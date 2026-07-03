@@ -30,6 +30,9 @@ jobs:
       - name: Xcode package tests
         run: make xcodebuild-test
 
+      - name: Build input method app
+        run: make build-input-method
+
       - name: Dictionary generator smoke test
         run: |
           python3 scripts/generate_onehand_t9_dict.py scripts/sample_pinyin.tsv > /tmp/onehand_t9.dict.yaml

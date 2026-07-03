@@ -19,6 +19,14 @@ let package = Package(
         .library(
             name: "OneHandKeyboard",
             targets: ["OneHandKeyboard"]
+        ),
+        .executable(
+            name: "LeftIOInputMethod",
+            targets: ["LeftIOInputMethod"]
+        ),
+        .executable(
+            name: "LeftIOLauncher",
+            targets: ["LeftIOLauncher"]
         )
     ],
     targets: [
@@ -35,6 +43,15 @@ let package = Package(
             name: "OneHandAppKit",
             dependencies: ["OneHandKeyboard"],
             path: "Sources/OneHandAppKit"
+        ),
+        .executableTarget(
+            name: "LeftIOInputMethod",
+            dependencies: ["OneHandAppKit"],
+            path: "Sources/LeftIOInputMethod"
+        ),
+        .executableTarget(
+            name: "LeftIOLauncher",
+            path: "Sources/LeftIOLauncher"
         ),
         .testTarget(
             name: "OneHandTests",

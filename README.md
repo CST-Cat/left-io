@@ -4,7 +4,7 @@
 
 LeftIO is a macOS one-hand T9-style Chinese input method experiment.
 
-The current repository contains the first landing layers: a testable Swift input controller core, a physical-key adapter for macOS keyboard events, and Rime schema/dictionary scaffolding. It is intentionally not wired into Squirrel/InputMethodKit yet.
+The current repository contains the first landing layers: a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an experimental InputMethodKit host, and Rime schema/dictionary scaffolding. The host is not wired to librime yet.
 
 ## Keyboard Layout
 
@@ -109,6 +109,30 @@ make xcodebuild-test
 `make test` runs XCTest only and disables Swift Testing discovery. The package currently uses XCTest, and this avoids a SwiftPM testing-helper code-signing issue on this macOS/Xcode setup.
 
 The GitHub Actions workflow runs both commands above and a dictionary-generator smoke test on macOS.
+
+## Local Installation
+
+Build the experimental InputMethodKit host:
+
+```sh
+make build-input-method
+```
+
+Install for the current user:
+
+```sh
+make install-input-method
+```
+
+Install system-wide, with a visible macOS administrator authorization prompt:
+
+```sh
+make install-input-method-system
+```
+
+The input method host is installed as `/Library/Input Methods/LeftIO.app`. The installer also places a normal launcher at `/Applications/LeftIO.app`, so LeftIO has a visible Launchpad icon; clicking it opens Keyboard settings and starts the input method host if it is installed.
+
+The current host is a functional IMK shell wired to the one-hand key state machine; it does not yet use librime for real Chinese candidates. For now, composition shows the numeric T9 code and commits that code. If macOS does not immediately show LeftIO in System Settings after installation, log out and back in to force Text Input Sources to rescan `/Library/Input Methods`.
 
 ## macOS Key Mapping
 
