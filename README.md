@@ -4,7 +4,7 @@
 
 LeftIO is a macOS one-hand T9-style Chinese input method experiment.
 
-The current repository contains a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an InputMethodKit host, and a lightweight dictionary-backed candidate engine that reads Rime-style T9 dictionary data. The host is still not wired to librime yet, but it now shows candidates, supports paging, and commits dictionary matches. The distributable DMG exposes a single `LeftIO.app`; when launched from `/Applications`, that app installs or updates the embedded input method into `/Library/Input Methods`.
+The current repository contains a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an InputMethodKit host, and a lightweight dictionary-backed candidate engine that reads Rime-style T9 dictionary data. The host is still not wired to librime yet, but it now shows candidates, supports paging, and commits dictionary matches. The distributable DMG exposes the actual `LeftIO.app` input method bundle together with an `Input Methods` shortcut so the app can be dragged directly into `/Library/Input Methods`.
 
 ## Keyboard Layout
 
@@ -128,7 +128,9 @@ Build a distributable installer image:
 make build-dmg
 ```
 
-The DMG contains a single `LeftIO.app`. Drag it to `/Applications`, then launch it once from `/Applications` to install or update the input method and open Keyboard settings. No extra installer script is required for normal use.
+The DMG contains the actual `LeftIO.app` input method bundle plus an `Input Methods` shortcut. Drag `LeftIO.app` onto `Input Methods` to install it directly into `/Library/Input Methods`.
+
+After the copy finishes, open System Settings -> Keyboard -> Text Input -> `编辑...` and confirm `LeftIO` is enabled in the input source list.
 
 The `make install-input-method` and `make install-input-method-system` commands below are only developer shortcuts for local testing from the repo checkout.
 
@@ -144,7 +146,7 @@ Install system-wide, with a visible macOS administrator authorization prompt:
 make install-input-method-system
 ```
 
-The actual input method host lives at `/Library/Input Methods/LeftIO.app` or `~/Library/Input Methods/LeftIO.app`. The visible app in `/Applications` is only the installer/updater shell that places the embedded input method bundle into the correct macOS input-method directory.
+The actual input method host lives at `/Library/Input Methods/LeftIO.app` or `~/Library/Input Methods/LeftIO.app`.
 
 The current host is a functional IMK shell wired to the one-hand key state machine and a lightweight in-process lexicon session. It reads `data/onehand_t9.dict.yaml`, shows candidates in the system candidate window, supports paging with `F/G`, and commits candidates with `Space` or `1-4`. It does not yet use librime, so advanced segmentation and user-dictionary behavior are still future work. If macOS does not immediately show LeftIO in System Settings after installation, log out and back in to force Text Input Sources to rescan `/Library/Input Methods`.
 

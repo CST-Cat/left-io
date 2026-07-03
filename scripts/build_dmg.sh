@@ -2,21 +2,21 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LAUNCHER_APP="$ROOT_DIR/.build/input-method/launcher/LeftIO.app"
+INPUT_METHOD_APP="$ROOT_DIR/.build/input-method/LeftIO.app"
 DMG_DIR="$ROOT_DIR/.build/dmg"
 STAGE_DIR="$DMG_DIR/LeftIO"
 OUTPUT_DMG="$DMG_DIR/LeftIO.dmg"
 
-if [[ ! -d "$LAUNCHER_APP" ]]; then
-  echo "Missing launcher app. Run scripts/build_input_method_app.sh first." >&2
+if [[ ! -d "$INPUT_METHOD_APP" ]]; then
+  echo "Missing input method app. Run scripts/build_input_method_app.sh first." >&2
   exit 1
 fi
 
 rm -rf "$STAGE_DIR" "$OUTPUT_DMG"
 mkdir -p "$STAGE_DIR"
 
-ditto "$LAUNCHER_APP" "$STAGE_DIR/LeftIO.app"
-ln -s /Applications "$STAGE_DIR/Applications"
+ditto "$INPUT_METHOD_APP" "$STAGE_DIR/LeftIO.app"
+ln -s "/Library/Input Methods" "$STAGE_DIR/Input Methods"
 
 hdiutil create \
   -volname "LeftIO" \
