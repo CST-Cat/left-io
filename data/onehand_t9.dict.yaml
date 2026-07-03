@@ -1,0 +1,19 @@
+---
+name: onehand_t9
+version: "0.1.0"
+sort: by_weight
+use_preset_vocabulary: true
+...
+
+# Minimal seed entries. Replace or extend this file with:
+#   scripts/generate_onehand_t9_dict.py path/to/pinyin.tsv > data/onehand_t9.dict.yaml
+你	64	1000
+好	426	1000
+我	96	1000
+是	744	1000
+的	33	1000
+了	536	900
+在	924	900
+不	28	900
+人	736	800
+中	94664	800

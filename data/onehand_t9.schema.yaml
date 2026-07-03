@@ -1,0 +1,77 @@
+# Rime schema for LeftIO one-hand T9 input.
+# The Swift layer maps physical keys to digits:
+# QWE / ASD / ZXC => 123 / 456 / 789 when used with Space,
+# W/E/A/S/D/Z/X/C => 2/3/4/5/6/7/8/9 for composition.
+
+schema:
+  schema_id: onehand_t9
+  name: LeftIO One-Hand T9
+  version: "0.1.0"
+  author:
+    - LeftIO
+  description: |
+    One-hand macOS T9-style pinyin input. Physical keyboard state is handled
+    by the Swift/InputMethodKit layer; librime receives numeric T9 codes.
+
+switches:
+  - name: ascii_mode
+    reset: 0
+    states: [ 中文, 西文 ]
+  - name: full_shape
+    states: [ 半角, 全角 ]
+  - name: simplification
+    reset: 1
+    states: [ 漢字, 汉字 ]
+  - name: ascii_punct
+    states: [ 。，, ．， ]
+
+engine:
+  processors:
+    - ascii_composer
+    - recognizer
+    - key_binder
+    - speller
+    - selector
+    - navigator
+    - punctuator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - matcher
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - punct_translator
+    - script_translator
+  filters:
+    - simplifier
+    - uniquifier
+
+speller:
+  alphabet: "23456789'"
+  delimiter: "'"
+  algebra:
+    - xform/^([23456789']+)$/$1/
+
+translator:
+  dictionary: onehand_t9
+  spelling_hints: 8
+  enable_sentence: true
+  enable_user_dict: true
+  enable_completion: true
+
+key_binder:
+  bindings:
+    - { when: paging, accept: F, send: Page_Up }
+    - { when: has_menu, accept: G, send: Page_Down }
+    - { when: has_menu, accept: 1, send: 1 }
+    - { when: has_menu, accept: 2, send: 2 }
+    - { when: has_menu, accept: 3, send: 3 }
+    - { when: has_menu, accept: 4, send: 4 }
+
+punctuator:
+  import_preset: default
+
+recognizer:
+  import_preset: default
