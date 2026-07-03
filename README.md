@@ -2,7 +2,7 @@
 
 LeftIO is a macOS one-hand T9-style Chinese input method experiment.
 
-The current repository contains the first landing layer: a testable Swift input controller core plus Rime schema/dictionary scaffolding. It is intentionally not wired into Squirrel/InputMethodKit yet.
+The current repository contains the first landing layers: a testable Swift input controller core, a physical-key adapter for macOS keyboard events, and Rime schema/dictionary scaffolding. It is intentionally not wired into Squirrel/InputMethodKit yet.
 
 ## Keyboard Layout
 
@@ -58,6 +58,14 @@ Sources/OneHand/
 ├── SpaceChordController.swift
 └── SymbolLayerController.swift
 
+Sources/OneHandKeyboard/
+├── OneHandANSIKeyCode.swift
+├── OneHandKeyboardModifierFlags.swift
+└── OneHandPhysicalKeyMapper.swift
+
+Sources/OneHandAppKit/
+└── OneHandMacKeyMapper.swift
+
 data/
 ├── onehand_t9.schema.yaml
 ├── onehand_t9.dict.yaml
@@ -73,6 +81,9 @@ Tests/OneHandTests/
 ├── SpaceChordTests.swift
 ├── SymbolLayerTests.swift
 └── T9EncoderTests.swift
+
+Tests/OneHandKeyboardTests/
+└── OneHandPhysicalKeyMapperTests.swift
 ```
 
 ## Open In Xcode
@@ -89,6 +100,25 @@ The command-line developer directory on this machine may still point to Command 
 make test
 make xcodebuild-test
 ```
+
+`make test` runs XCTest only and disables Swift Testing discovery. The package currently uses XCTest, and this avoids a SwiftPM testing-helper code-signing issue on this macOS/Xcode setup.
+
+## macOS Key Mapping
+
+The keyboard adapter is split into two layers:
+
+```text
+OneHandKeyboard
+-> pure Swift physical ANSI key-code mapping
+-> tested without AppKit
+
+OneHandAppKit
+-> converts NSEvent keyDown/keyUp events
+-> maps NSEvent.ModifierFlags into OneHandKeyboardModifierFlags
+-> delegates to OneHandPhysicalKeyMapper
+```
+
+The physical mapper ignores events using `Command`, `Option`, or `Control`. `Shift` and `Caps Lock` are allowed because the one-hand layout is based on physical keys rather than typed characters.
 
 ## Rime Dictionary Generation
 
@@ -120,16 +150,16 @@ The apostrophe is kept as the syllable delimiter.
 
 ## Next Integration Step
 
-The next phase is to fork or vendor `rime/squirrel`, then add an adapter that translates macOS keyboard events into `OneHandKeyEvent` and applies `OneHandAction` to the Squirrel/librime session.
+The next phase is to fork or vendor `rime/squirrel`, then call `OneHandMacKeyMapper.event(from:)` from the Squirrel/InputMethodKit key-event path and apply `OneHandAction` to the Squirrel/librime session.
 
-Suggested adapter boundary:
+Current adapter boundary:
 
 ```text
 InputMethodKit key event
--> Squirrel key normalization
+-> OneHandMacKeyMapper.event(from:)
 -> OneHandInputController.handle(...)
 -> OneHandRimeSession.apply(...)
 -> librime / client text commit
 ```
 
-Keep this package as the pure state-machine layer. That lets the high-risk interaction rules stay covered by normal XCTest while the Squirrel integration stays thin.
+Keep `OneHand` and `OneHandKeyboard` as the pure, tested layers. Let `OneHandAppKit` and the future Squirrel adapter stay thin.
