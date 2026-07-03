@@ -20,11 +20,12 @@ swift build -c release --product "$LAUNCHER_PRODUCT_NAME"
 BIN_DIR="$(swift build -c release --show-bin-path)"
 
 rm -rf "$INPUT_APP_DIR" "$LAUNCHER_APP_DIR"
-mkdir -p "$INPUT_APP_DIR/Contents/MacOS" "$INPUT_APP_DIR/Contents/Resources"
+mkdir -p "$INPUT_APP_DIR/Contents/MacOS" "$INPUT_APP_DIR/Contents/Resources/Rime"
 mkdir -p "$LAUNCHER_APP_DIR/Contents/MacOS" "$LAUNCHER_APP_DIR/Contents/Resources"
 
 cp "$BIN_DIR/$INPUT_PRODUCT_NAME" "$INPUT_APP_DIR/Contents/MacOS/$INPUT_PRODUCT_NAME"
 cp "$BIN_DIR/$LAUNCHER_PRODUCT_NAME" "$LAUNCHER_APP_DIR/Contents/MacOS/$LAUNCHER_PRODUCT_NAME"
+cp "$ROOT_DIR"/data/*.yaml "$INPUT_APP_DIR/Contents/Resources/Rime/"
 
 APP_ICON_PPM="$BUILD_DIR/app_icon.ppm"
 MENU_ICON_PPM="$BUILD_DIR/menu_icon.ppm"
@@ -48,13 +49,11 @@ def app_pixel(x, y):
     g = 34 + int(66 * y / 1023)
     b = 46 + int(36 * (x + y) / 2046)
 
-    # L
     if 210 <= x <= 305 and 238 <= y <= 760:
         return (242, 248, 255)
     if 210 <= x <= 505 and 665 <= y <= 760:
         return (242, 248, 255)
 
-    # 9, drawn as block segments so it survives Launchpad scaling.
     if 575 <= x <= 820 and 238 <= y <= 330:
         return (255, 213, 92)
     if 575 <= x <= 665 and 238 <= y <= 515:
@@ -66,7 +65,6 @@ def app_pixel(x, y):
     if 575 <= x <= 820 and 670 <= y <= 760:
         return (255, 213, 92)
 
-    # Small left-hand key hint.
     if 154 <= x <= 870 and 824 <= y <= 858:
         return (95, 220, 190)
     if 154 <= x <= 188 and 790 <= y <= 858:
@@ -283,6 +281,8 @@ printf 'APPL????' > "$LAUNCHER_APP_DIR/Contents/PkgInfo"
 plutil -lint "$INPUT_APP_DIR/Contents/Info.plist"
 plutil -lint "$LAUNCHER_APP_DIR/Contents/Info.plist"
 codesign --force --deep --sign - "$INPUT_APP_DIR"
+mkdir -p "$LAUNCHER_APP_DIR/Contents/Resources/InputMethod"
+ditto "$INPUT_APP_DIR" "$LAUNCHER_APP_DIR/Contents/Resources/InputMethod/$APP_NAME.app"
 codesign --force --deep --sign - "$LAUNCHER_APP_DIR"
 
 echo "$INPUT_APP_DIR"

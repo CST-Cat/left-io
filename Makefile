@@ -1,6 +1,6 @@
 XCODE_DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
 
-.PHONY: test xcodebuild-test generate-sample-dict build-input-method install-input-method install-input-method-system uninstall-input-method
+.PHONY: test xcodebuild-test generate-sample-dict build-input-method build-dmg install-input-method install-input-method-system uninstall-input-method
 
 test:
 	DEVELOPER_DIR="$(XCODE_DEVELOPER_DIR)" swift test --disable-swift-testing
@@ -13,6 +13,9 @@ generate-sample-dict:
 
 build-input-method:
 	DEVELOPER_DIR="$(XCODE_DEVELOPER_DIR)" scripts/build_input_method_app.sh
+
+build-dmg: build-input-method
+	DEVELOPER_DIR="$(XCODE_DEVELOPER_DIR)" scripts/build_dmg.sh
 
 install-input-method: build-input-method
 	scripts/install_input_method_app.sh

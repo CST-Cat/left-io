@@ -1,6 +1,6 @@
 import Foundation
 
-public final class OneHandInputController<Session: OneHandRimeSession> {
+public final class OneHandInputController<Session: OneHandSession> {
     private var stateMachine: OneHandStateMachine
     private let session: Session
 

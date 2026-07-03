@@ -4,7 +4,7 @@
 
 LeftIO is a macOS one-hand T9-style Chinese input method experiment.
 
-The current repository contains the first landing layers: a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an experimental InputMethodKit host, and Rime schema/dictionary scaffolding. The host is not wired to librime yet.
+The current repository contains a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an InputMethodKit host, and a lightweight dictionary-backed candidate engine that reads Rime-style T9 dictionary data. The host is still not wired to librime yet, but it now shows candidates, supports paging, and commits dictionary matches. The distributable DMG exposes a single `LeftIO.app`; when launched from `/Applications`, that app installs or updates the embedded input method into `/Library/Input Methods`.
 
 ## Keyboard Layout
 
@@ -50,11 +50,14 @@ V       -> commit composition
 ```text
 Sources/OneHand/
 ├── OneHandAction.swift
+├── OneHandClientAction.swift
 ├── OneHandConfiguration.swift
 ├── OneHandContext.swift
 ├── OneHandHandleResult.swift
 ├── OneHandInputController.swift
 ├── OneHandKey.swift
+├── OneHandLexicon.swift
+├── OneHandLexiconSession.swift
 ├── OneHandRecordingSession.swift
 ├── OneHandRimeBridge.swift
 ├── OneHandStateMachine.swift
@@ -82,6 +85,7 @@ scripts/
 
 Tests/OneHandTests/
 ├── OneHandInputControllerTests.swift
+├── OneHandLexiconSessionTests.swift
 ├── OneHandStateMachineTests.swift
 ├── SpaceChordTests.swift
 ├── SymbolLayerTests.swift
@@ -118,6 +122,16 @@ Build the experimental InputMethodKit host:
 make build-input-method
 ```
 
+Build a distributable installer image:
+
+```sh
+make build-dmg
+```
+
+The DMG contains a single `LeftIO.app`. Drag it to `/Applications`, then launch it once from `/Applications` to install or update the input method and open Keyboard settings. No extra installer script is required for normal use.
+
+The `make install-input-method` and `make install-input-method-system` commands below are only developer shortcuts for local testing from the repo checkout.
+
 Install for the current user:
 
 ```sh
@@ -130,9 +144,9 @@ Install system-wide, with a visible macOS administrator authorization prompt:
 make install-input-method-system
 ```
 
-The input method host is installed as `/Library/Input Methods/LeftIO.app`. The installer also places a normal launcher at `/Applications/LeftIO.app`, so LeftIO has a visible Launchpad icon; clicking it opens Keyboard settings and starts the input method host if it is installed.
+The actual input method host lives at `/Library/Input Methods/LeftIO.app` or `~/Library/Input Methods/LeftIO.app`. The visible app in `/Applications` is only the installer/updater shell that places the embedded input method bundle into the correct macOS input-method directory.
 
-The current host is a functional IMK shell wired to the one-hand key state machine; it does not yet use librime for real Chinese candidates. For now, composition shows the numeric T9 code and commits that code. If macOS does not immediately show LeftIO in System Settings after installation, log out and back in to force Text Input Sources to rescan `/Library/Input Methods`.
+The current host is a functional IMK shell wired to the one-hand key state machine and a lightweight in-process lexicon session. It reads `data/onehand_t9.dict.yaml`, shows candidates in the system candidate window, supports paging with `F/G`, and commits candidates with `Space` or `1-4`. It does not yet use librime, so advanced segmentation and user-dictionary behavior are still future work. If macOS does not immediately show LeftIO in System Settings after installation, log out and back in to force Text Input Sources to rescan `/Library/Input Methods`.
 
 ## macOS Key Mapping
 
@@ -164,34 +178,33 @@ if let event = OneHandMacKeyMapper.event(from: nsEvent) {
 
 The future Squirrel/InputMethodKit adapter should use `isConsumed`, not action count, to decide whether to swallow the original key event. `Space` key-down deliberately returns an empty action list because the controller is waiting to determine whether the user is starting a chord or pressing Space alone, but that key event is still consumed.
 
-`OneHandRimeSession` is the host boundary:
+`OneHandSession` is the host boundary:
 
 ```swift
-public protocol OneHandRimeSession {
+public protocol OneHandSession {
     var context: OneHandContext { get }
+    var compositionText: String { get }
+    var displayedCandidates: [String] { get }
     func apply(_ action: OneHandAction)
+    func takeClientActions() -> [OneHandClientAction]
 }
 ```
 
-Expected action mapping:
+Current session implementations:
 
 ```text
-inputT9Code            -> send numeric code to librime composition
-insertSyllableDelimiter-> send apostrophe delimiter to librime composition
-commitFirstCandidate   -> select/commit candidate 0
-selectCandidate        -> select/commit candidate index
-pageUp / pageDown      -> candidate page navigation
-commitComposition      -> commit current composition
-deleteBackward         -> delete in composition, or client delete if empty
-insertText             -> commit literal text to client
-inputDigit             -> commit literal digit to client
-insertSpace            -> commit ordinary space to client
-insertNewline          -> commit newline to client
-enter/exitSymbolLayer  -> internal state marker; usually no librime call
-cancelPendingSpace     -> cleanup marker after focus/input-method reset
+OneHandLexiconSession
+-> loads entries from a Rime-style dictionary file
+-> keeps the current numeric composition
+-> pages visible candidates
+-> emits client actions such as insertText/deleteBackward
+
+OneHandRecordingSession
+-> test double used by unit tests
+-> records actions without AppKit or candidate UI
 ```
 
-`OneHandRecordingSession` is included for tests and adapter prototyping; it records actions without depending on librime or AppKit.
+The future librime bridge can conform to the same protocol and replace `OneHandLexiconSession` without changing the state machine.
 
 ## Rime Dictionary Generation
 
@@ -221,19 +234,15 @@ becomes:
 
 The apostrophe is kept as the syllable delimiter.
 
-## Next Integration Step
-
-The next phase is to fork or vendor `rime/squirrel`, then call `OneHandMacKeyMapper.event(from:)` from the Squirrel/InputMethodKit key-event path and apply `OneHandAction` to the Squirrel/librime session.
-
-Current adapter boundary:
+## Current Adapter Boundary
 
 ```text
 InputMethodKit key event
 -> OneHandMacKeyMapper.event(from:)
 -> OneHandInputController.handle(...)
 -> if result.isConsumed, consume original key event
--> OneHandRimeSession.apply(...)
--> librime / client text commit
+-> OneHandSession.apply(...)
+-> IMK marked text / candidate window / client text commit
 ```
 
-Keep `OneHand` and `OneHandKeyboard` as the pure, tested layers. Let `OneHandAppKit` and the future Squirrel adapter stay thin.
+The next backend phase is still to add a real librime session behind `OneHandSession`. Keep `OneHand` and `OneHandKeyboard` as the pure, tested layers. Let `OneHandAppKit` and any future Squirrel/librime adapter stay thin.
