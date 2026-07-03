@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Swift and Rime Scaffold
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      - name: SwiftPM tests
+        run: make test
+
+      - name: Xcode package tests
+        run: make xcodebuild-test
+
+      - name: Dictionary generator smoke test
+        run: |
+          python3 scripts/generate_onehand_t9_dict.py scripts/sample_pinyin.tsv > /tmp/onehand_t9.dict.yaml
+          grep -F "你好	64'426	1000" /tmp/onehand_t9.dict.yaml

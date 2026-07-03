@@ -1,5 +1,7 @@
 # LeftIO
 
+[![CI](https://github.com/CST-Cat/left-io/actions/workflows/ci.yml/badge.svg)](https://github.com/CST-Cat/left-io/actions/workflows/ci.yml)
+
 LeftIO is a macOS one-hand T9-style Chinese input method experiment.
 
 The current repository contains the first landing layers: a testable Swift input controller core, a physical-key adapter for macOS keyboard events, and Rime schema/dictionary scaffolding. It is intentionally not wired into Squirrel/InputMethodKit yet.
@@ -105,6 +107,8 @@ make xcodebuild-test
 ```
 
 `make test` runs XCTest only and disables Swift Testing discovery. The package currently uses XCTest, and this avoids a SwiftPM testing-helper code-signing issue on this macOS/Xcode setup.
+
+The GitHub Actions workflow runs both commands above and a dictionary-generator smoke test on macOS.
 
 ## macOS Key Mapping
 
