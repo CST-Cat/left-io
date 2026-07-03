@@ -50,8 +50,10 @@ Sources/OneHand/
 ├── OneHandAction.swift
 ├── OneHandConfiguration.swift
 ├── OneHandContext.swift
+├── OneHandHandleResult.swift
 ├── OneHandInputController.swift
 ├── OneHandKey.swift
+├── OneHandRecordingSession.swift
 ├── OneHandRimeBridge.swift
 ├── OneHandStateMachine.swift
 ├── OneHandT9Encoder.swift
@@ -77,6 +79,7 @@ scripts/
 └── sample_pinyin.tsv
 
 Tests/OneHandTests/
+├── OneHandInputControllerTests.swift
 ├── OneHandStateMachineTests.swift
 ├── SpaceChordTests.swift
 ├── SymbolLayerTests.swift
@@ -120,6 +123,48 @@ OneHandAppKit
 
 The physical mapper ignores events using `Command`, `Option`, or `Control`. `Shift` and `Caps Lock` are allowed because the one-hand layout is based on physical keys rather than typed characters.
 
+## Session Contract
+
+`OneHandInputController.handle(_:)` applies actions to the provided session and returns `OneHandHandleResult`:
+
+```swift
+if let event = OneHandMacKeyMapper.event(from: nsEvent) {
+    let result = controller.handle(event)
+    return result.isConsumed
+}
+```
+
+The future Squirrel/InputMethodKit adapter should use `isConsumed`, not action count, to decide whether to swallow the original key event. `Space` key-down deliberately returns an empty action list because the controller is waiting to determine whether the user is starting a chord or pressing Space alone, but that key event is still consumed.
+
+`OneHandRimeSession` is the host boundary:
+
+```swift
+public protocol OneHandRimeSession {
+    var context: OneHandContext { get }
+    func apply(_ action: OneHandAction)
+}
+```
+
+Expected action mapping:
+
+```text
+inputT9Code            -> send numeric code to librime composition
+insertSyllableDelimiter-> send apostrophe delimiter to librime composition
+commitFirstCandidate   -> select/commit candidate 0
+selectCandidate        -> select/commit candidate index
+pageUp / pageDown      -> candidate page navigation
+commitComposition      -> commit current composition
+deleteBackward         -> delete in composition, or client delete if empty
+insertText             -> commit literal text to client
+inputDigit             -> commit literal digit to client
+insertSpace            -> commit ordinary space to client
+insertNewline          -> commit newline to client
+enter/exitSymbolLayer  -> internal state marker; usually no librime call
+cancelPendingSpace     -> cleanup marker after focus/input-method reset
+```
+
+`OneHandRecordingSession` is included for tests and adapter prototyping; it records actions without depending on librime or AppKit.
+
 ## Rime Dictionary Generation
 
 Input rows are tab-separated:
@@ -158,6 +203,7 @@ Current adapter boundary:
 InputMethodKit key event
 -> OneHandMacKeyMapper.event(from:)
 -> OneHandInputController.handle(...)
+-> if result.isConsumed, consume original key event
 -> OneHandRimeSession.apply(...)
 -> librime / client text commit
 ```

@@ -9,17 +9,21 @@ public final class OneHandInputController<Session: OneHandRimeSession> {
         self.stateMachine = OneHandStateMachine(configuration: configuration)
     }
 
-    public func handle(_ event: OneHandKeyEvent) {
+    @discardableResult
+    public func handle(_ event: OneHandKeyEvent) -> OneHandHandleResult {
         let actions = stateMachine.handle(event, context: session.context)
         for action in actions {
             session.apply(action)
         }
+        return OneHandHandleResult(actions: actions, isConsumed: true)
     }
 
-    public func cancelTransientState() {
+    @discardableResult
+    public func cancelTransientState() -> [OneHandAction] {
         let actions = stateMachine.cancelTransientState()
         for action in actions {
             session.apply(action)
         }
+        return actions
     }
 }
