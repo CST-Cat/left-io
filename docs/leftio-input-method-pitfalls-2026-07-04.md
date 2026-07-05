@@ -944,3 +944,55 @@ handle keyCode=...
 ```
 
 如果只有 `eventTapR enabled`，没有 `controller init`，说明 server 在跑但 IMK client 仍未绑定 controller。
+
+### 18.12 2026-07-05 系统里出现两个 LeftIO 单手九宫格
+
+症状：系统输入法列表/TIS 枚举里出现两个 `LeftIO 单手九宫格`。一开始容易误判为本地装了两个 app 包。
+
+实际检查本机路径：
+
+```text
+present ~/Library/Input Methods/LeftIO.app
+missing ~/Applications/LeftIO.app
+missing /Library/Input Methods/LeftIO.app
+missing /Applications/LeftIO.app
+```
+
+说明不是安装路径里有两个 `LeftIO.app`。真正原因是偏好域里重复启用了同一个 mode：
+
+```text
+com.apple.HIToolbox AppleEnabledInputSources:
+  Bundle ID = io.github.cstcat.inputmethod.leftio
+  Input Mode = io.github.cstcat.inputmethod.leftio.onehandt9
+
+com.apple.inputsources AppleEnabledThirdPartyInputSources:
+  Bundle ID = io.github.cstcat.inputmethod.leftio
+  Input Mode = io.github.cstcat.inputmethod.leftio.onehandt9
+```
+
+`AppleEnabledThirdPartyInputSources` 里保留 LeftIO parent source 是必要的，但不应该再保留同一个 selectable mode；否则 TIS 会把同一个 `LeftIO 单手九宫格` mode 枚举两次。
+
+本轮修复增加了一个手动修复入口；正常安装流程不自动写 `com.apple.HIToolbox` 或 `com.apple.inputsources`：
+
+```sh
+make repair-input-method-sources
+```
+
+这个命令的用途很窄：只在系统设置、菜单栏或 TIS 枚举里出现两个 `LeftIO 单手九宫格` 时使用。它不是安装步骤，也不是常规刷新手段。
+
+它只处理 LeftIO 自己的条目：
+
+- 删除旧 bundle ID `io.github.cstcat.leftio`。
+- `com.apple.HIToolbox` 里只保留一条 `io.github.cstcat.inputmethod.leftio.onehandt9` mode。
+- `com.apple.inputsources` 里只保留 LeftIO parent `Keyboard Input Method`，移除重复 mode。
+- 只有确实需要改动时，才先备份对应的 plist。
+- 刷新 `cfprefsd` 并杀掉旧 `LeftIO` 进程。
+
+修复后 TIS 应该只看到一个 selectable mode 和一个 parent source：
+
+```text
+io.github.cstcat.inputmethod.leftio.onehandt9 | ... | LeftIO 单手九宫格 | enabled=1 | selectCapable=1
+io.github.cstcat.inputmethod.leftio | - | LeftIO | enabled=1 | selectCapable=0
+```
+
+注意：第二行 parent source 是正常结构，不是第二个输入法。真正要避免的是两个 `LeftIO 单手九宫格` mode。

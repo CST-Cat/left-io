@@ -1,6 +1,6 @@
 XCODE_DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
 
-.PHONY: test xcodebuild-test generate-sample-dict build-vendored-librime build-input-method build-dmg install-input-method install-input-method-system verify-input-method uninstall-input-method
+.PHONY: test xcodebuild-test generate-sample-dict build-vendored-librime build-input-method build-dmg install-input-method install-input-method-system verify-input-method repair-input-method-sources uninstall-input-method
 
 test:
 	DEVELOPER_DIR="$(XCODE_DEVELOPER_DIR)" swift test --disable-swift-testing
@@ -28,6 +28,9 @@ install-input-method-system: build-input-method
 
 verify-input-method:
 	scripts/verify_input_method_install.sh
+
+repair-input-method-sources:
+	scripts/repair_input_method_sources.sh
 
 uninstall-input-method:
 	scripts/uninstall_input_method_app.sh

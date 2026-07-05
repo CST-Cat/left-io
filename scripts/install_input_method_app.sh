@@ -45,6 +45,7 @@ Next steps:
   3. Add "LeftIO 单手九宫格" manually.
 
 This installer does not write com.apple.HIToolbox and does not switch the current input source.
+If LeftIO appears twice, run: make repair-input-method-sources
 MSG
 
 echo "$TARGET_APP"
