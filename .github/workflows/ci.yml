@@ -9,9 +9,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: Swift and Rime Scaffold
+  validate:
+    name: Validate source only
     runs-on: macos-15
 
     steps:
@@ -24,16 +28,33 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Shell script syntax
+        run: bash -n scripts/*.sh
+
+      - name: Python script syntax
+        run: python3 -m py_compile scripts/generate_onehand_t9_dict.py
+
+      - name: Guard signing secrets
+        run: |
+          if git ls-files | grep -Ei '(^|/)(AuthKey_.*\.p8|.*\.(p12|pfx|cer|crt|pem|key|mobileprovision|provisionprofile|developerprofile))$'; then
+            echo "Signing credential or private key file found in checkout." >&2
+            exit 1
+          fi
+
       - name: SwiftPM tests
         run: make test
 
       - name: Xcode package tests
         run: make xcodebuild-test
 
-      - name: Build input method app
-        run: make build-input-method
-
       - name: Dictionary generator smoke test
         run: |
           python3 scripts/generate_onehand_t9_dict.py scripts/sample_pinyin.tsv > /tmp/onehand_t9.dict.yaml
           grep -F "你好	64'426	1000" /tmp/onehand_t9.dict.yaml
+
+      - name: Guard distributable artifacts
+        run: |
+          if git ls-files | grep -Ei '\.(dmg|pkg|xcarchive)$'; then
+            echo "Distributable artifact found in checkout. DMGs are intentionally not built or uploaded by CI." >&2
+            exit 1
+          fi
