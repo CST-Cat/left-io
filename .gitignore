@@ -4,3 +4,18 @@
 *.xcuserstate
 DerivedData/
 *.xcresult
+/vendor/
+
+# Apple/Xcode signing credentials and local export artifacts.
+*.p12
+*.pfx
+*.cer
+*.crt
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
+*.developerprofile
+AuthKey_*.p8
+*.xcarchive
+ExportOptions.plist

@@ -43,7 +43,7 @@ public struct SpaceChordController: Equatable, Sendable {
             return nil
         }
 
-        return context.hasCandidates ? .commitFirstCandidate : .insertSpace
+        return (context.isComposing || context.hasCandidates) ? .commitFirstCandidate : .insertSpace
     }
 
     public mutating func cancel() -> OneHandAction? {

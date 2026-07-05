@@ -10,6 +10,7 @@ public enum OneHandPhysicalKeyMapper {
 
     public static func map(
         keyCode: UInt16,
+        characters: String? = nil,
         charactersIgnoringModifiers: String?,
         modifierFlags: OneHandKeyboardModifierFlags,
         phase: OneHandKeyPhase
@@ -23,7 +24,61 @@ public enum OneHandPhysicalKeyMapper {
             return nil
         }
 
-        return OneHandKeyEvent(key: key, phase: phase)
+        return OneHandKeyEvent(
+            key: key,
+            phase: phase,
+            modifiers: keyModifiers(
+                from: modifierFlags,
+                characters: characters,
+                charactersIgnoringModifiers: charactersIgnoringModifiers,
+                key: key
+            )
+        )
+    }
+
+    private static func keyModifiers(
+        from flags: OneHandKeyboardModifierFlags,
+        characters: String?,
+        charactersIgnoringModifiers: String?,
+        key: OneHandKey
+    ) -> OneHandKeyModifiers {
+        var result: OneHandKeyModifiers = []
+        if isShiftModified(
+            flags: flags,
+            characters: characters,
+            charactersIgnoringModifiers: charactersIgnoringModifiers,
+            key: key
+        ) {
+            result.insert(.shift)
+        }
+        if flags.contains(.capsLock) {
+            result.insert(.capsLock)
+        }
+        return result
+    }
+
+    private static func isShiftModified(
+        flags: OneHandKeyboardModifierFlags,
+        characters: String?,
+        charactersIgnoringModifiers: String?,
+        key: OneHandKey
+    ) -> Bool {
+        guard flags.contains(.shift) else {
+            return false
+        }
+
+        guard key == .f || key == .g else {
+            return true
+        }
+
+        guard let characters,
+              let charactersIgnoringModifiers,
+              let character = characters.first,
+              let characterIgnoringModifiers = charactersIgnoringModifiers.first else {
+            return false
+        }
+
+        return character != characterIgnoringModifiers
     }
 
     private static func physicalKey(for keyCode: UInt16) -> OneHandKey? {
@@ -46,6 +101,7 @@ public enum OneHandPhysicalKeyMapper {
         case OneHandANSIKeyCode.digit2: .digit2
         case OneHandANSIKeyCode.digit3: .digit3
         case OneHandANSIKeyCode.digit4: .digit4
+        case OneHandANSIKeyCode.escape: .escape
         default: nil
         }
     }
@@ -74,6 +130,7 @@ public enum OneHandPhysicalKeyMapper {
         case "2": .digit2
         case "3": .digit3
         case "4": .digit4
+        case "\u{1b}": .escape
         default: nil
         }
     }

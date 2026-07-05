@@ -28,6 +28,21 @@ public final class OneHandRecordingSession: OneHandSession {
         return clientActions
     }
 
+    public func commitCurrentComposition() {}
+
+    public func commitDisplayedCandidate(matching text: String) {}
+
+    public func setAsciiMode(_ enabled: Bool) {
+        context.isAsciiMode = enabled
+    }
+
+    public func reset() {
+        context = OneHandContext()
+        compositionText = ""
+        displayedCandidates.removeAll()
+        resetActions()
+    }
+
     public func resetActions() {
         appliedActions.removeAll()
         clientActions.removeAll()

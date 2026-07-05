@@ -19,6 +19,7 @@ public enum OneHandKey: String, CaseIterable, Sendable {
     case digit2 = "2"
     case digit3 = "3"
     case digit4 = "4"
+    case escape = "Escape"
     case other = "Other"
 
     public var t9Code: String? {
@@ -78,9 +79,30 @@ public enum OneHandKeyPhase: Sendable {
 public struct OneHandKeyEvent: Sendable, Equatable {
     public var key: OneHandKey
     public var phase: OneHandKeyPhase
+    public var modifiers: OneHandKeyModifiers
 
-    public init(key: OneHandKey, phase: OneHandKeyPhase) {
+    public init(
+        key: OneHandKey,
+        phase: OneHandKeyPhase,
+        modifiers: OneHandKeyModifiers = []
+    ) {
         self.key = key
         self.phase = phase
+        self.modifiers = modifiers
     }
+
+    public var isShiftModified: Bool {
+        modifiers.contains(.shift)
+    }
+}
+
+public struct OneHandKeyModifiers: OptionSet, Equatable, Sendable {
+    public let rawValue: UInt
+
+    public init(rawValue: UInt) {
+        self.rawValue = rawValue
+    }
+
+    public static let shift = Self(rawValue: 1 << 0)
+    public static let capsLock = Self(rawValue: 1 << 1)
 }

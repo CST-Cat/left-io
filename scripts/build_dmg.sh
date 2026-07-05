@@ -16,7 +16,7 @@ rm -rf "$STAGE_DIR" "$OUTPUT_DMG"
 mkdir -p "$STAGE_DIR"
 
 ditto "$INPUT_METHOD_APP" "$STAGE_DIR/LeftIO.app"
-ln -s "/Library/Input Methods" "$STAGE_DIR/Input Methods"
+ln -s "/Applications" "$STAGE_DIR/Applications"
 
 hdiutil create \
   -volname "LeftIO" \

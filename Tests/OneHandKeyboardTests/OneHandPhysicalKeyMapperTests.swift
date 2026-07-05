@@ -23,6 +23,7 @@ final class OneHandPhysicalKeyMapperTests: XCTestCase {
         XCTAssertEqual(map(OneHandANSIKeyCode.space), .init(key: .space, phase: .down))
         XCTAssertEqual(map(OneHandANSIKeyCode.digit1), .init(key: .digit1, phase: .down))
         XCTAssertEqual(map(OneHandANSIKeyCode.digit4), .init(key: .digit4, phase: .down))
+        XCTAssertEqual(map(OneHandANSIKeyCode.escape), .init(key: .escape, phase: .down))
     }
 
     func testPreservesKeyUpPhase() {
@@ -43,19 +44,79 @@ final class OneHandPhysicalKeyMapperTests: XCTestCase {
     }
 
     func testAllowsShiftAndCapsLockModifiedEvents() {
-        XCTAssertEqual(map(OneHandANSIKeyCode.w, modifiers: .shift), .init(key: .w, phase: .down))
-        XCTAssertEqual(map(OneHandANSIKeyCode.w, modifiers: .capsLock), .init(key: .w, phase: .down))
+        XCTAssertEqual(
+            map(OneHandANSIKeyCode.w, modifiers: .shift),
+            .init(key: .w, phase: .down, modifiers: .shift)
+        )
+        XCTAssertEqual(
+            map(OneHandANSIKeyCode.w, modifiers: .capsLock),
+            .init(key: .w, phase: .down, modifiers: .capsLock)
+        )
+    }
+
+    func testPageFallbackKeysUseCharactersToDisambiguateShift() {
+        XCTAssertEqual(
+            OneHandPhysicalKeyMapper.map(
+                keyCode: OneHandANSIKeyCode.f,
+                characters: "f",
+                charactersIgnoringModifiers: "f",
+                modifierFlags: .shift,
+                phase: .down
+            ),
+            .init(key: .f, phase: .down)
+        )
+        XCTAssertEqual(
+            OneHandPhysicalKeyMapper.map(
+                keyCode: OneHandANSIKeyCode.f,
+                characters: "F",
+                charactersIgnoringModifiers: "f",
+                modifierFlags: .shift,
+                phase: .down
+            ),
+            .init(key: .f, phase: .down, modifiers: .shift)
+        )
+        XCTAssertEqual(
+            OneHandPhysicalKeyMapper.map(
+                keyCode: OneHandANSIKeyCode.g,
+                characters: "g",
+                charactersIgnoringModifiers: "g",
+                modifierFlags: .shift,
+                phase: .down
+            ),
+            .init(key: .g, phase: .down)
+        )
+        XCTAssertEqual(
+            OneHandPhysicalKeyMapper.map(
+                keyCode: OneHandANSIKeyCode.g,
+                characters: "G",
+                charactersIgnoringModifiers: "g",
+                modifierFlags: .shift,
+                phase: .down
+            ),
+            .init(key: .g, phase: .down, modifiers: .shift)
+        )
     }
 
     func testFallsBackToCharactersForNonANSIKeyCodes() {
         let event = OneHandPhysicalKeyMapper.map(
             keyCode: 999,
-            charactersIgnoringModifiers: "v",
+            charactersIgnoringModifiers: "\u{1b}",
             modifierFlags: [],
             phase: .down
         )
 
-        XCTAssertEqual(event, .init(key: .v, phase: .down))
+        XCTAssertEqual(event, .init(key: .escape, phase: .down))
+    }
+
+    func testFallsBackToCharactersForRecognizedEscapeCharacter() {
+        let event = OneHandPhysicalKeyMapper.map(
+            keyCode: 999,
+            charactersIgnoringModifiers: "\u{1b}",
+            modifierFlags: [],
+            phase: .down
+        )
+
+        XCTAssertEqual(event, .init(key: .escape, phase: .down))
     }
 
     func testUnknownKeysReturnNil() {

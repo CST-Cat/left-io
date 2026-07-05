@@ -15,12 +15,22 @@ public final class OneHandInputController<Session: OneHandSession> {
         for action in actions {
             session.apply(action)
         }
-        return OneHandHandleResult(actions: actions, isConsumed: true)
+        let isConsumed = event.key != .escape || !actions.isEmpty
+        return OneHandHandleResult(actions: actions, isConsumed: isConsumed)
     }
 
     @discardableResult
     public func cancelTransientState() -> [OneHandAction] {
         let actions = stateMachine.cancelTransientState()
+        for action in actions {
+            session.apply(action)
+        }
+        return actions
+    }
+
+    @discardableResult
+    public func cancelPendingSpace() -> [OneHandAction] {
+        let actions = stateMachine.cancelPendingSpace()
         for action in actions {
             session.apply(action)
         }

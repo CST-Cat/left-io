@@ -36,6 +36,25 @@ final class OneHandLexiconSessionTests: XCTestCase {
         XCTAssertEqual(session.displayedCandidates, [])
     }
 
+    func testSessionSupportsMultiSyllableDelimiterMatches() {
+        let session = OneHandLexiconSession(lexicon: .seed)
+
+        session.apply(.inputT9Code("6"))
+        session.apply(.inputT9Code("4"))
+        session.apply(.insertSyllableDelimiter)
+        session.apply(.inputT9Code("4"))
+        session.apply(.inputT9Code("2"))
+        session.apply(.inputT9Code("6"))
+
+        XCTAssertEqual(session.compositionText, "64'426")
+        XCTAssertEqual(session.displayedCandidates, ["你好"])
+
+        session.apply(.commitComposition)
+
+        XCTAssertEqual(session.takeClientActions(), [.insertText("你好")])
+        XCTAssertFalse(session.context.isComposing)
+    }
+
     func testSessionSupportsPagingAndRelativeCandidateSelection() {
         let lexicon = OneHandLexicon(entries: [
             .init(text: "一", code: "2", weight: 500),
@@ -72,5 +91,31 @@ final class OneHandLexiconSessionTests: XCTestCase {
         session.apply(.deleteBackward)
 
         XCTAssertEqual(session.takeClientActions(), [.deleteBackward])
+    }
+
+    func testDirectOutputCommitsCompositionBeforeDigit() {
+        let lexicon = OneHandLexicon(entries: [
+            .init(text: "你", code: "64", weight: 1000)
+        ])
+        let session = OneHandLexiconSession(lexicon: lexicon)
+
+        session.apply(.inputT9Code("6"))
+        session.apply(.inputT9Code("4"))
+        session.apply(.inputDigit(2))
+
+        XCTAssertEqual(session.takeClientActions(), [.insertText("你"), .insertText("2")])
+        XCTAssertFalse(session.context.isComposing)
+    }
+
+    func testCancelCompositionClearsPendingLexiconState() {
+        let session = OneHandLexiconSession(lexicon: .seed)
+
+        session.apply(.inputT9Code("6"))
+        session.apply(.inputT9Code("4"))
+        session.apply(.cancelComposition)
+
+        XCTAssertEqual(session.compositionText, "")
+        XCTAssertEqual(session.displayedCandidates, [])
+        XCTAssertFalse(session.context.isComposing)
     }
 }

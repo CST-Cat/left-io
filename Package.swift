@@ -9,6 +9,10 @@ let package = Package(
     ],
     products: [
         .library(
+            name: "CRimeBridge",
+            targets: ["CRimeBridge"]
+        ),
+        .library(
             name: "OneHand",
             targets: ["OneHand"]
         ),
@@ -31,7 +35,13 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CRimeBridge",
+            path: "Sources/CRimeBridge",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "OneHand",
+            dependencies: ["CRimeBridge"],
             path: "Sources/OneHand"
         ),
         .target(

@@ -17,6 +17,7 @@ public enum OneHandMacKeyMapper {
 
         return map(
             keyCode: event.keyCode,
+            characters: event.characters,
             charactersIgnoringModifiers: event.charactersIgnoringModifiers,
             modifierFlags: keyboardFlags(from: event.modifierFlags),
             phase: phase
@@ -25,19 +26,37 @@ public enum OneHandMacKeyMapper {
 
     public static func map(
         keyCode: UInt16,
+        characters: String? = nil,
+        charactersIgnoringModifiers: String?,
+        modifierFlags: NSEvent.ModifierFlags,
+        phase: OneHandKeyPhase
+    ) -> OneHandKeyEvent? {
+        map(
+            keyCode: keyCode,
+            characters: characters,
+            charactersIgnoringModifiers: charactersIgnoringModifiers,
+            modifierFlags: keyboardFlags(from: modifierFlags),
+            phase: phase
+        )
+    }
+
+    public static func map(
+        keyCode: UInt16,
+        characters: String? = nil,
         charactersIgnoringModifiers: String?,
         modifierFlags: OneHandKeyboardModifierFlags,
         phase: OneHandKeyPhase
     ) -> OneHandKeyEvent? {
         OneHandPhysicalKeyMapper.map(
             keyCode: keyCode,
+            characters: characters,
             charactersIgnoringModifiers: charactersIgnoringModifiers,
             modifierFlags: modifierFlags,
             phase: phase
         )
     }
 
-    private static func keyboardFlags(from flags: NSEvent.ModifierFlags) -> OneHandKeyboardModifierFlags {
+    public static func keyboardFlags(from flags: NSEvent.ModifierFlags) -> OneHandKeyboardModifierFlags {
         var result: OneHandKeyboardModifierFlags = []
         if flags.contains(.shift) {
             result.insert(.shift)

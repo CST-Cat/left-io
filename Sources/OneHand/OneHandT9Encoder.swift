@@ -13,8 +13,18 @@ public enum OneHandT9Encoder {
     ]
 
     public static func encode(_ pinyin: String) -> String? {
+        let normalized = pinyin
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "u:", with: "v")
+            .replacingOccurrences(of: "ü", with: "v")
+
         var result = ""
-        for character in pinyin.lowercased() {
+        for character in normalized {
+            if character == " " || character == "'" {
+                result.append("'")
+                continue
+            }
             guard let code = letterToCode[character] else {
                 return nil
             }

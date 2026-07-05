@@ -19,4 +19,6 @@ public enum OneHandANSIKeyCode {
     public static let digit3: UInt16 = 20
     public static let digit4: UInt16 = 21
     public static let space: UInt16 = 49
+    public static let delete: UInt16 = 51
+    public static let escape: UInt16 = 53
 }

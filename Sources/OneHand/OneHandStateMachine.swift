@@ -11,7 +11,7 @@ public struct OneHandStateMachine: Equatable, Sendable {
     public mutating func handle(_ event: OneHandKeyEvent, context: OneHandContext) -> [OneHandAction] {
         switch event.phase {
         case .down:
-            return handleKeyDown(event.key, context: context)
+            return handleKeyDown(event, context: context)
         case .up:
             return handleKeyUp(event.key, context: context)
         }
@@ -28,13 +28,27 @@ public struct OneHandStateMachine: Equatable, Sendable {
         return actions
     }
 
-    private mutating func handleKeyDown(_ key: OneHandKey, context: OneHandContext) -> [OneHandAction] {
+    public mutating func cancelPendingSpace() -> [OneHandAction] {
+        guard let action = spaceChord.cancel() else {
+            return []
+        }
+
+        return [action]
+    }
+
+    private mutating func handleKeyDown(_ event: OneHandKeyEvent, context: OneHandContext) -> [OneHandAction] {
+        let key = event.key
+
         if key == .space {
             spaceChord.begin()
             return []
         }
 
         if spaceChord.isHoldingSpace {
+            if key == .escape {
+                return routeNonSpaceKeyDown(event, context: context)
+            }
+
             if let chord = spaceChord.chordAction(for: key) {
                 return [chord]
             }
@@ -43,11 +57,11 @@ public struct OneHandStateMachine: Equatable, Sendable {
             if let standaloneSpace = spaceChord.end(context: context) {
                 actions.append(standaloneSpace)
             }
-            actions.append(contentsOf: routeNonSpaceKeyDown(key, context: context))
+            actions.append(contentsOf: routeNonSpaceKeyDown(event, context: context))
             return actions
         }
 
-        return routeNonSpaceKeyDown(key, context: context)
+        return routeNonSpaceKeyDown(event, context: context)
     }
 
     private mutating func handleKeyUp(_ key: OneHandKey, context: OneHandContext) -> [OneHandAction] {
@@ -62,9 +76,19 @@ public struct OneHandStateMachine: Equatable, Sendable {
         return []
     }
 
-    private mutating func routeNonSpaceKeyDown(_ key: OneHandKey, context: OneHandContext) -> [OneHandAction] {
+    private mutating func routeNonSpaceKeyDown(_ event: OneHandKeyEvent, context: OneHandContext) -> [OneHandAction] {
+        let key = event.key
+
         if let symbolActions = symbolLayer.action(for: key) {
             return symbolActions
+        }
+
+        if key == .escape {
+            var actions = cancelTransientState()
+            if context.isComposing {
+                actions.append(.cancelComposition)
+            }
+            return actions
         }
 
         if key == .q {
@@ -87,13 +111,27 @@ public struct OneHandStateMachine: Equatable, Sendable {
         case .r:
             return [.deleteBackward]
         case .f:
-            return [.pageUp]
+            if context.hasCandidates {
+                return [.pageUp]
+            }
+            return [.insertText(fallbackTextForF(event: event, context: context))]
         case .g:
-            return [.pageDown]
+            if context.hasCandidates {
+                return [.pageDown]
+            }
+            return [.insertText(event.isShiftModified ? "+" : "=")]
         case .v:
             return [.commitComposition]
         default:
             return []
         }
+    }
+
+    private func fallbackTextForF(event: OneHandKeyEvent, context: OneHandContext) -> String {
+        guard event.isShiftModified else {
+            return "-"
+        }
+
+        return context.isAsciiMode ? "_" : "——"
     }
 }

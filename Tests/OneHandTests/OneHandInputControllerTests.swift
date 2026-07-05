@@ -23,6 +23,18 @@ final class OneHandInputControllerTests: XCTestCase {
         XCTAssertEqual(session.appliedActions, [.insertSpace])
     }
 
+    func testSpaceReleaseUsesComposingStateEvenWithoutCandidates() {
+        let session = OneHandRecordingSession(context: .init(isComposing: true))
+        let controller = OneHandInputController(session: session)
+
+        XCTAssertEqual(controller.handle(.init(key: .space, phase: .down)), .init(actions: [], isConsumed: true))
+        XCTAssertEqual(
+            controller.handle(.init(key: .space, phase: .up)),
+            .init(actions: [.commitFirstCandidate], isConsumed: true)
+        )
+        XCTAssertEqual(session.appliedActions, [.commitFirstCandidate])
+    }
+
     func testSymbolLayerActionsFlowThroughSession() {
         let configuration = OneHandConfiguration(symbols: [.w: .text("，")])
         let session = OneHandRecordingSession()
@@ -52,5 +64,32 @@ final class OneHandInputControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.cancelTransientState(), [.cancelPendingSpace, .exitSymbolLayer])
         XCTAssertEqual(session.appliedActions, [.enterSymbolLayer, .cancelPendingSpace, .exitSymbolLayer])
+    }
+
+    func testEscapePassesThroughWhenNothingNeedsCancellation() {
+        let session = OneHandRecordingSession()
+        let controller = OneHandInputController(session: session)
+
+        XCTAssertEqual(controller.handle(.init(key: .escape, phase: .down)), .init(actions: [], isConsumed: false))
+        XCTAssertTrue(session.appliedActions.isEmpty)
+    }
+
+    func testAuxiliaryKeysAreConsumedWithoutCandidates() {
+        let session = OneHandRecordingSession()
+        let controller = OneHandInputController(session: session)
+
+        XCTAssertEqual(
+            controller.handle(.init(key: .r, phase: .down)),
+            .init(actions: [.deleteBackward], isConsumed: true)
+        )
+        XCTAssertEqual(
+            controller.handle(.init(key: .f, phase: .down)),
+            .init(actions: [.insertText("-")], isConsumed: true)
+        )
+        XCTAssertEqual(
+            controller.handle(.init(key: .g, phase: .down, modifiers: .shift)),
+            .init(actions: [.insertText("+")], isConsumed: true)
+        )
+        XCTAssertEqual(session.appliedActions, [.deleteBackward, .insertText("-"), .insertText("+")])
     }
 }

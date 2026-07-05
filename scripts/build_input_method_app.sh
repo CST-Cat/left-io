@@ -2,35 +2,131 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENDORED_RIME_ROOT="$ROOT_DIR/vendor/librime"
+LIBRIME_BOOTSTRAP_SCRIPT="$ROOT_DIR/scripts/build_vendored_librime.sh"
 INPUT_PRODUCT_NAME="LeftIOInputMethod"
-LAUNCHER_PRODUCT_NAME="LeftIOLauncher"
 APP_NAME="LeftIO"
-BUNDLE_ID="io.github.cstcat.leftio"
-LAUNCHER_BUNDLE_ID="io.github.cstcat.leftio.launcher"
-MODE_ID="io.github.cstcat.leftio.onehandt9"
-CONNECTION_NAME="LeftIO_1_Connection"
+APP_EXECUTABLE_NAME="LeftIO"
+APP_BUNDLE_ID="io.github.cstcat.inputmethod.leftio"
+MODE_ID="io.github.cstcat.inputmethod.leftio.onehandt9"
+CONNECTION_NAME="${APP_BUNDLE_ID}_Connection"
 BUILD_DIR="$ROOT_DIR/.build/input-method"
-INPUT_APP_DIR="$BUILD_DIR/$APP_NAME.app"
-LAUNCHER_APP_DIR="$BUILD_DIR/launcher/$APP_NAME.app"
+APP_DIR="$BUILD_DIR/$APP_NAME.app"
+FRAMEWORKS_DIR="$APP_DIR/Contents/Frameworks"
+RESOURCES_DIR="$APP_DIR/Contents/Resources"
+MIN_SYSTEM_VERSION="15.0"
+RIME_MINIMAL_DIR="${LEFTIO_RIME_MINIMAL_DIR:-$VENDORED_RIME_ROOT/data/minimal}"
+
+preferred_input_method_sdkroot() {
+  local sdk_dir
+  for sdk_dir in \
+    /Library/Developer/CommandLineTools/SDKs/MacOSX15*.sdk \
+    /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15*.sdk; do
+    if [[ -d "$sdk_dir" ]]; then
+      echo "$sdk_dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_vendored_librime() {
+  for candidate in \
+    "$VENDORED_RIME_ROOT/build/lib/librime.1.dylib" \
+    "$VENDORED_RIME_ROOT/build/lib/Release/librime.1.dylib" \
+    "$VENDORED_RIME_ROOT/dist/lib/librime.1.dylib" \
+    "$VENDORED_RIME_ROOT/build/lib/librime.dylib" \
+    "$VENDORED_RIME_ROOT/build/lib/Release/librime.dylib" \
+    "$VENDORED_RIME_ROOT/dist/lib/librime.dylib"; do
+    if [[ -f "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+should_auto_bootstrap_librime() {
+  if [[ "${LEFTIO_SKIP_LIBRIME_BOOTSTRAP:-0}" == "1" ]]; then
+    return 1
+  fi
+
+  if [[ -n "${LEFTIO_AUTO_BOOTSTRAP_LIBRIME:-}" ]]; then
+    if [[ "${LEFTIO_AUTO_BOOTSTRAP_LIBRIME}" == "1" ]]; then
+      return 0
+    fi
+    return 1
+  fi
+
+  [[ "${CI:-}" != "true" ]]
+}
+
+ensure_vendored_librime() {
+  if [[ -d "$RIME_MINIMAL_DIR" ]] && detect_vendored_librime >/dev/null; then
+    return 0
+  fi
+
+  if ! should_auto_bootstrap_librime; then
+    return 0
+  fi
+
+  echo "Vendored librime is missing. Bootstrapping it now..." >&2
+  "$LIBRIME_BOOTSTRAP_SCRIPT"
+}
+
+detect_signing_identity() {
+  security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' \
+    | head -n 1
+}
+
+SDKROOT_OVERRIDE="${LEFTIO_SDKROOT:-$(preferred_input_method_sdkroot || true)}"
+MIN_SYSTEM_VERSION="${LEFTIO_MIN_SYSTEM_VERSION:-$MIN_SYSTEM_VERSION}"
+SIGNING_IDENTITY="${LEFTIO_SIGNING_IDENTITY:-$(detect_signing_identity)}"
 
 cd "$ROOT_DIR"
 
-swift build -c release --product "$INPUT_PRODUCT_NAME"
-swift build -c release --product "$LAUNCHER_PRODUCT_NAME"
-BIN_DIR="$(swift build -c release --show-bin-path)"
+ensure_vendored_librime
 
-rm -rf "$INPUT_APP_DIR" "$LAUNCHER_APP_DIR"
-mkdir -p "$INPUT_APP_DIR/Contents/MacOS" "$INPUT_APP_DIR/Contents/Resources/Rime"
-mkdir -p "$LAUNCHER_APP_DIR/Contents/MacOS" "$LAUNCHER_APP_DIR/Contents/Resources"
+SWIFT_BUILD_ENV=()
+if [[ -n "$SDKROOT_OVERRIDE" ]]; then
+  SWIFT_BUILD_ENV+=("SDKROOT=$SDKROOT_OVERRIDE")
+fi
+if [[ -n "$MIN_SYSTEM_VERSION" ]]; then
+  SWIFT_BUILD_ENV+=("MACOSX_DEPLOYMENT_TARGET=$MIN_SYSTEM_VERSION")
+fi
 
-cp "$BIN_DIR/$INPUT_PRODUCT_NAME" "$INPUT_APP_DIR/Contents/MacOS/$INPUT_PRODUCT_NAME"
-cp "$BIN_DIR/$LAUNCHER_PRODUCT_NAME" "$LAUNCHER_APP_DIR/Contents/MacOS/$LAUNCHER_PRODUCT_NAME"
-cp "$ROOT_DIR"/data/*.yaml "$INPUT_APP_DIR/Contents/Resources/Rime/"
+env "${SWIFT_BUILD_ENV[@]}" swift build -c release --product "$INPUT_PRODUCT_NAME"
+BIN_DIR="$(env "${SWIFT_BUILD_ENV[@]}" swift build -c release --show-bin-path)"
+
+rm -rf "$APP_DIR"
+mkdir -p \
+  "$APP_DIR/Contents/MacOS" \
+  "$RESOURCES_DIR" \
+  "$FRAMEWORKS_DIR" \
+  "$RESOURCES_DIR/Rime"
+
+cp "$BIN_DIR/$INPUT_PRODUCT_NAME" "$APP_DIR/Contents/MacOS/$APP_EXECUTABLE_NAME"
+if [[ -d "$RIME_MINIMAL_DIR" ]]; then
+  cp "$RIME_MINIMAL_DIR"/* "$RESOURCES_DIR/Rime/"
+fi
+cp "$ROOT_DIR"/data/*.yaml "$RESOURCES_DIR/Rime/"
+cat > "$RESOURCES_DIR/InfoPlist.strings" <<STRINGS
+"CFBundleDisplayName" = "LeftIO 单手九宫格";
+"CFBundleName" = "LeftIO";
+"$MODE_ID" = "LeftIO 单手九宫格";
+STRINGS
+
+VENDORED_LIBRIME_PATH="${LEFTIO_LIBRIME_DYLIB:-$(detect_vendored_librime || true)}"
+if [[ -n "$VENDORED_LIBRIME_PATH" ]]; then
+  cp "$VENDORED_LIBRIME_PATH" "$FRAMEWORKS_DIR/"
+fi
 
 APP_ICON_PPM="$BUILD_DIR/app_icon.ppm"
-MENU_ICON_PPM="$BUILD_DIR/menu_icon.ppm"
-python3 - "$APP_ICON_PPM" "$MENU_ICON_PPM" <<'PY'
+MENU_ICON_PNG="$RESOURCES_DIR/menu_icon.png"
+python3 - "$APP_ICON_PPM" "$MENU_ICON_PNG" <<'PY'
 import sys
+from PIL import Image, ImageDraw
 
 app_path, menu_path = sys.argv[1:3]
 
@@ -72,23 +168,18 @@ def app_pixel(x, y):
 
     return (r, g, b)
 
-def menu_pixel(x, y):
-    value = 255
-    border = x in (4, 5, 58, 59) or y in (4, 5, 58, 59)
-    l_glyph = (14 <= x <= 19 and 14 <= y <= 47) or (14 <= x <= 33 and 42 <= y <= 47)
-    nine_glyph = (
-        (38 <= x <= 52 and 14 <= y <= 19) or
-        (38 <= x <= 43 and 14 <= y <= 32) or
-        (48 <= x <= 52 and 14 <= y <= 47) or
-        (38 <= x <= 52 and 28 <= y <= 33) or
-        (38 <= x <= 52 and 42 <= y <= 47)
-    )
-    if border or l_glyph or nine_glyph:
-        value = 0
-    return (value, value, value)
-
 write_ppm(app_path, 1024, 1024, app_pixel)
-write_ppm(menu_path, 64, 64, menu_pixel)
+
+icon = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+draw = ImageDraw.Draw(icon)
+ink = (0, 0, 0, 255)
+
+# Use a single, small "L" with generous padding. This reads cleanly in
+# the menu bar and avoids the oversized multi-letter look in Settings.
+draw.rounded_rectangle((4, 3, 6, 12), radius=1, fill=ink)
+draw.rounded_rectangle((4, 10, 10, 12), radius=1, fill=ink)
+
+icon.save(menu_path)
 PY
 
 ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"
@@ -109,11 +200,9 @@ for spec in \
     set -- $spec
     sips -z "$1" "$2" "$BUILD_DIR/AppIcon-1024.png" --out "$ICONSET_DIR/$3" >/dev/null
 done
-iconutil -c icns "$ICONSET_DIR" -o "$INPUT_APP_DIR/Contents/Resources/AppIcon.icns"
-cp "$INPUT_APP_DIR/Contents/Resources/AppIcon.icns" "$LAUNCHER_APP_DIR/Contents/Resources/AppIcon.icns"
-sips -s format tiff "$MENU_ICON_PPM" --out "$INPUT_APP_DIR/Contents/Resources/menu_icon.tiff" >/dev/null
+iconutil -c icns "$ICONSET_DIR" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
 
-cat > "$INPUT_APP_DIR/Contents/Info.plist" <<PLIST
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -124,13 +213,13 @@ cat > "$INPUT_APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key>
   <string>LeftIO 单手九宫格</string>
   <key>CFBundleExecutable</key>
-  <string>$INPUT_PRODUCT_NAME</string>
+  <string>$APP_EXECUTABLE_NAME</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIconName</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>$BUNDLE_ID</string>
+  <string>$APP_BUNDLE_ID</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -147,23 +236,28 @@ cat > "$INPUT_APP_DIR/Contents/Info.plist" <<PLIST
   </array>
   <key>CFBundleVersion</key>
   <string>1</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.utilities</string>
+  <key>LSBackgroundOnly</key>
+  <false/>
+  <key>LSHasLocalizedDisplayName</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>$MIN_SYSTEM_VERSION</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
   <key>ComponentInputModeDict</key>
   <dict>
     <key>tsInputModeListKey</key>
     <dict>
       <key>$MODE_ID</key>
       <dict>
-        <key>TISIconLabels</key>
-        <dict>
-          <key>Primary</key>
-          <string>L9</string>
-        </dict>
         <key>TISInputSourceID</key>
         <string>$MODE_ID</string>
-        <key>TISIntendedLanguage</key>
-        <string>zh-Hans</string>
         <key>tsInputModeAlternateMenuIconFileKey</key>
-        <string>menu_icon.tiff</string>
+        <string>menu_icon.png</string>
         <key>tsInputModeDefaultStateKey</key>
         <true/>
         <key>tsInputModeKeyEquivalentKey</key>
@@ -171,13 +265,13 @@ cat > "$INPUT_APP_DIR/Contents/Info.plist" <<PLIST
         <key>tsInputModeKeyEquivalentModifiersKey</key>
         <integer>4608</integer>
         <key>tsInputModeMenuIconFileKey</key>
-        <string>menu_icon.tiff</string>
+        <string>menu_icon.png</string>
         <key>tsInputModePaletteIconFileKey</key>
-        <string>menu_icon.tiff</string>
+        <string>menu_icon.png</string>
         <key>tsInputModeCharacterRepertoireKey</key>
         <array>
           <string>Hans</string>
-          <string>Latn</string>
+          <string>Hant</string>
         </array>
         <key>tsInputModeIsVisibleKey</key>
         <true/>
@@ -195,95 +289,55 @@ cat > "$INPUT_APP_DIR/Contents/Info.plist" <<PLIST
   <key>InputMethodConnectionName</key>
   <string>$CONNECTION_NAME</string>
   <key>InputMethodServerControllerClass</key>
-  <string>LeftIOInputMethod.LeftIOInputController</string>
+  <string>LeftIOInputController</string>
   <key>InputMethodServerDelegateClass</key>
-  <string>LeftIOInputMethod.LeftIOInputController</string>
-  <key>LSApplicationCategoryType</key>
-  <string>public.app-category.utilities</string>
-  <key>LSBackgroundOnly</key>
-  <false/>
-  <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>LeftIOInputController</string>
   <key>LSUIElement</key>
-  <true/>
-  <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright 2026 LeftIO contributors.</string>
-  <key>NSPrincipalClass</key>
-  <string>NSApplication</string>
   <key>NSSupportsSuddenTermination</key>
   <true/>
   <key>TICapsLockLanguageSwitchCapable</key>
   <true/>
   <key>TISIconIsTemplate</key>
   <true/>
+  <key>TISInputSourceID</key>
+  <string>$APP_BUNDLE_ID</string>
   <key>TISIntendedLanguage</key>
   <string>zh-Hans</string>
   <key>tsInputMethodCharacterRepertoireKey</key>
   <array>
     <string>Hans</string>
+    <string>Hant</string>
     <string>Latn</string>
   </array>
   <key>tsInputMethodIconFileKey</key>
-  <string>menu_icon.tiff</string>
+  <string>menu_icon.png</string>
 </dict>
 </plist>
 PLIST
 
-cat > "$LAUNCHER_APP_DIR/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDevelopmentRegion</key>
-  <string>zh_CN</string>
-  <key>CFBundleDisplayName</key>
-  <string>LeftIO</string>
-  <key>CFBundleExecutable</key>
-  <string>$LAUNCHER_PRODUCT_NAME</string>
-  <key>CFBundleIconFile</key>
-  <string>AppIcon</string>
-  <key>CFBundleIconName</key>
-  <string>AppIcon</string>
-  <key>CFBundleIdentifier</key>
-  <string>$LAUNCHER_BUNDLE_ID</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleName</key>
-  <string>LeftIO</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
-  <key>CFBundleSupportedPlatforms</key>
-  <array>
-    <string>MacOSX</string>
-  </array>
-  <key>CFBundleVersion</key>
-  <string>1</string>
-  <key>LSApplicationCategoryType</key>
-  <string>public.app-category.utilities</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-  <key>NSPrincipalClass</key>
-  <string>NSApplication</string>
-</dict>
-</plist>
-PLIST
+printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
-printf 'APPL????' > "$INPUT_APP_DIR/Contents/PkgInfo"
-printf 'APPL????' > "$LAUNCHER_APP_DIR/Contents/PkgInfo"
+plutil -lint "$APP_DIR/Contents/Info.plist"
+if [[ -d "$FRAMEWORKS_DIR" ]]; then
+  while IFS= read -r framework_binary; do
+    if [[ -n "$SIGNING_IDENTITY" ]]; then
+      codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$framework_binary"
+    else
+      codesign --force --sign - "$framework_binary"
+    fi
+  done < <(find "$FRAMEWORKS_DIR" -type f \( -name '*.dylib' -o -name '*.framework' \) -print)
+fi
+if [[ -n "$SIGNING_IDENTITY" ]]; then
+  codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR"
+else
+  codesign --force --sign - "$APP_DIR"
+fi
+xattr -cr "$APP_DIR" 2>/dev/null || true
+xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
+xattr -dr com.apple.provenance "$APP_DIR" 2>/dev/null || true
+xattr -dr com.apple.macl "$APP_DIR" 2>/dev/null || true
 
-plutil -lint "$INPUT_APP_DIR/Contents/Info.plist"
-plutil -lint "$LAUNCHER_APP_DIR/Contents/Info.plist"
-codesign --force --deep --sign - "$INPUT_APP_DIR"
-mkdir -p "$LAUNCHER_APP_DIR/Contents/Resources/InputMethod"
-ditto "$INPUT_APP_DIR" "$LAUNCHER_APP_DIR/Contents/Resources/InputMethod/$APP_NAME.app"
-codesign --force --deep --sign - "$LAUNCHER_APP_DIR"
-
-echo "$INPUT_APP_DIR"
-echo "$LAUNCHER_APP_DIR"
+echo "$APP_DIR"

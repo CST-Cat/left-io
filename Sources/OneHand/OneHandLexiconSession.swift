@@ -7,6 +7,7 @@ public final class OneHandLexiconSession: OneHandSession {
     public private(set) var compositionText = ""
     public private(set) var allCandidates: [String] = []
 
+    private var isAsciiMode = false
     private var currentPageIndex = 0
     private var pendingClientActions: [OneHandClientAction] = []
 
@@ -26,7 +27,8 @@ public final class OneHandLexiconSession: OneHandSession {
     public var context: OneHandContext {
         OneHandContext(
             isComposing: !compositionText.isEmpty,
-            hasCandidates: !allCandidates.isEmpty
+            hasCandidates: !allCandidates.isEmpty,
+            isAsciiMode: isAsciiMode
         )
     }
 
@@ -39,6 +41,10 @@ public final class OneHandLexiconSession: OneHandSession {
         switch action {
         case .enterSymbolLayer, .exitSymbolLayer, .cancelPendingSpace:
             break
+        case .cancelComposition:
+            compositionText.removeAll()
+            allCandidates.removeAll()
+            currentPageIndex = 0
         case .insertSyllableDelimiter:
             guard !compositionText.isEmpty else {
                 return
@@ -49,8 +55,10 @@ public final class OneHandLexiconSession: OneHandSession {
             compositionText.append(code)
             refreshCandidates(resetPage: true)
         case let .inputDigit(digit):
+            flushCompositionBeforeDirectOutput()
             pendingClientActions.append(.insertText(String(digit)))
         case let .insertText(text):
+            flushCompositionBeforeDirectOutput()
             pendingClientActions.append(.insertText(text))
         case .deleteBackward:
             if !compositionText.isEmpty {
@@ -74,8 +82,10 @@ public final class OneHandLexiconSession: OneHandSession {
         case .commitComposition:
             commitCurrentComposition()
         case .insertSpace:
+            flushCompositionBeforeDirectOutput()
             pendingClientActions.append(.insertText(" "))
         case .insertNewline:
+            flushCompositionBeforeDirectOutput()
             pendingClientActions.append(.insertText("\n"))
         }
     }
@@ -114,6 +124,13 @@ public final class OneHandLexiconSession: OneHandSession {
         commitDisplayedCandidate(at: index)
     }
 
+    public func setAsciiMode(_ enabled: Bool) {
+        isAsciiMode = enabled
+        compositionText.removeAll()
+        allCandidates.removeAll()
+        currentPageIndex = 0
+    }
+
     private var hasNextPage: Bool {
         (currentPageIndex + 1) * pageSize < allCandidates.count
     }
@@ -143,5 +160,12 @@ public final class OneHandLexiconSession: OneHandSession {
 
         let lastPageIndex = max((allCandidates.count - 1) / pageSize, 0)
         currentPageIndex = min(currentPageIndex, lastPageIndex)
+    }
+
+    private func flushCompositionBeforeDirectOutput() {
+        guard !compositionText.isEmpty else {
+            return
+        }
+        commitCurrentComposition()
     }
 }

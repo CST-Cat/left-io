@@ -16,4 +16,5 @@ public enum OneHandAction: Equatable, Sendable {
     case insertSpace
     case insertNewline
     case cancelPendingSpace
+    case cancelComposition
 }
