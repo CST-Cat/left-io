@@ -5,10 +5,13 @@ public protocol OneHandSession: AnyObject {
     var context: OneHandContext { get }
     var compositionText: String { get }
     var displayedCandidates: [String] { get }
+    var expandedCandidates: [String] { get }
+    func expandedCandidateWindow(startingAt startIndex: Int, limit: Int) -> [String]
     func apply(_ action: OneHandAction)
     func takeClientActions() -> [OneHandClientAction]
     func commitCurrentComposition()
     func commitDisplayedCandidate(matching text: String)
+    func commitExpandedCandidate(at index: Int)
     func setAsciiMode(_ enabled: Bool)
     func reset()
 }
@@ -23,6 +26,11 @@ public final class AnyOneHandSession: OneHandSession {
     public var context: OneHandContext { session.context }
     public var compositionText: String { session.compositionText }
     public var displayedCandidates: [String] { session.displayedCandidates }
+    public var expandedCandidates: [String] { session.expandedCandidates }
+
+    public func expandedCandidateWindow(startingAt startIndex: Int, limit: Int) -> [String] {
+        session.expandedCandidateWindow(startingAt: startIndex, limit: limit)
+    }
 
     public func apply(_ action: OneHandAction) {
         session.apply(action)
@@ -40,6 +48,10 @@ public final class AnyOneHandSession: OneHandSession {
         session.commitDisplayedCandidate(matching: text)
     }
 
+    public func commitExpandedCandidate(at index: Int) {
+        session.commitExpandedCandidate(at: index)
+    }
+
     public func setAsciiMode(_ enabled: Bool) {
         session.setAsciiMode(enabled)
     }
@@ -54,6 +66,7 @@ protocol OneHandRimeBridgeClient: AnyObject {
     func commitComposition() -> Bool
     func clearComposition()
     func selectCandidateOnCurrentPage(_ index: Int) -> Bool
+    func selectCandidate(at index: Int) -> Bool
     func changePage(backward: Bool) -> Bool
     func isAsciiMode() -> Bool
     func setAsciiMode(_ enabled: Bool) -> Bool
@@ -62,6 +75,7 @@ protocol OneHandRimeBridgeClient: AnyObject {
     func copyPreedit() -> String?
     func candidateCount() -> Int
     func copyCandidate(at index: Int) -> String?
+    func copyCandidateListCandidate(at index: Int) -> String?
 }
 
 final class LiveOneHandRimeBridge: OneHandRimeBridgeClient {
@@ -116,6 +130,10 @@ final class LiveOneHandRimeBridge: OneHandRimeBridgeClient {
         OneHandRimeBridgeSelectCandidateOnCurrentPage(handle, index)
     }
 
+    func selectCandidate(at index: Int) -> Bool {
+        OneHandRimeBridgeSelectCandidateAtIndex(handle, index)
+    }
+
     func changePage(backward: Bool) -> Bool {
         OneHandRimeBridgeChangePage(handle, backward)
     }
@@ -150,6 +168,10 @@ final class LiveOneHandRimeBridge: OneHandRimeBridgeClient {
 
     func copyCandidate(at index: Int) -> String? {
         Self.copyString(from: OneHandRimeBridgeCopyCandidateAtIndex(handle, index))
+    }
+
+    func copyCandidateListCandidate(at index: Int) -> String? {
+        Self.copyString(from: OneHandRimeBridgeCopyCandidateListAtIndex(handle, index))
     }
 
     private static func copyString(from pointer: UnsafeMutablePointer<CChar>?) -> String? {
@@ -225,6 +247,7 @@ public final class OneHandRimeSession: OneHandSession {
 
     public private(set) var compositionText = ""
     public private(set) var displayedCandidates: [String] = []
+    public private(set) var expandedCandidates: [String] = []
 
     private let bridge: any OneHandRimeBridgeClient
     private let pageSize: Int
@@ -348,6 +371,16 @@ public final class OneHandRimeSession: OneHandSession {
         refreshState()
     }
 
+    public func commitExpandedCandidate(at index: Int) {
+        guard index >= 0 else {
+            return
+        }
+
+        _ = bridge.selectCandidate(at: index)
+        drainCommitText()
+        refreshState()
+    }
+
     public func setAsciiMode(_ enabled: Bool) {
         _ = bridge.setAsciiMode(enabled)
         if !rawInput.isEmpty {
@@ -362,7 +395,12 @@ public final class OneHandRimeSession: OneHandSession {
         rawInput = ""
         compositionText = ""
         displayedCandidates.removeAll()
+        expandedCandidates.removeAll()
         pendingClientActions.removeAll()
+    }
+
+    public func expandedCandidateWindow(startingAt startIndex: Int, limit: Int) -> [String] {
+        Self.copyExpandedCandidates(from: bridge, startIndex: startIndex, limit: limit)
     }
 
     public static func defaultUserDataDirectory() -> URL {
@@ -411,5 +449,28 @@ public final class OneHandRimeSession: OneHandSession {
         displayedCandidates = (0..<count).compactMap { index in
             bridge.copyCandidate(at: index)
         }
+        expandedCandidates = Self.copyExpandedCandidates(from: bridge, startIndex: 0, limit: 24)
+    }
+
+    private static func copyExpandedCandidates(
+        from bridge: any OneHandRimeBridgeClient,
+        startIndex: Int,
+        limit: Int
+    ) -> [String] {
+        guard startIndex >= 0,
+              limit > 0 else {
+            return []
+        }
+
+        var candidates: [String] = []
+        candidates.reserveCapacity(limit)
+        for index in startIndex..<(startIndex + limit) {
+            guard let candidate = bridge.copyCandidateListCandidate(at: index),
+                  !candidate.isEmpty else {
+                break
+            }
+            candidates.append(candidate)
+        }
+        return candidates
     }
 }

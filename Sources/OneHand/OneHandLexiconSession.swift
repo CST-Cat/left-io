@@ -24,6 +24,20 @@ public final class OneHandLexiconSession: OneHandSession {
         return Array(allCandidates[start..<end])
     }
 
+    public var expandedCandidates: [String] {
+        Array(allCandidates.prefix(24))
+    }
+
+    public func expandedCandidateWindow(startingAt startIndex: Int, limit: Int) -> [String] {
+        guard startIndex >= 0,
+              limit > 0,
+              startIndex < allCandidates.count else {
+            return []
+        }
+
+        return Array(allCandidates[startIndex..<min(startIndex + limit, allCandidates.count)])
+    }
+
     public var context: OneHandContext {
         OneHandContext(
             isComposing: !compositionText.isEmpty,
@@ -122,6 +136,14 @@ public final class OneHandLexiconSession: OneHandSession {
             return
         }
         commitDisplayedCandidate(at: index)
+    }
+
+    public func commitExpandedCandidate(at index: Int) {
+        guard allCandidates.indices.contains(index) else {
+            return
+        }
+
+        queueCommit(allCandidates[index])
     }
 
     public func setAsciiMode(_ enabled: Bool) {

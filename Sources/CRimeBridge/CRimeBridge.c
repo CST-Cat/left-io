@@ -582,6 +582,19 @@ bool OneHandRimeBridgeSelectCandidateOnCurrentPage(OneHandRimeBridgeHandle* hand
   return true;
 }
 
+bool OneHandRimeBridgeSelectCandidateAtIndex(OneHandRimeBridgeHandle* handle,
+                                             size_t index) {
+  if (!validate_handle(handle)) {
+    return false;
+  }
+  if (!g_runtime.api->select_candidate(handle->session_id, index)) {
+    set_last_error("failed to select rime candidate by absolute index.");
+    return false;
+  }
+  set_last_error(NULL);
+  return true;
+}
+
 bool OneHandRimeBridgeChangePage(OneHandRimeBridgeHandle* handle, bool backward) {
   if (!validate_handle(handle)) {
     return false;
@@ -699,6 +712,36 @@ char* OneHandRimeBridgeCopyCandidateAtIndex(OneHandRimeBridgeHandle* handle,
     text = duplicate_string(context.menu.candidates[index].text);
   }
   g_runtime.api->free_context(&context);
+  return text;
+}
+
+char* OneHandRimeBridgeCopyCandidateListAtIndex(OneHandRimeBridgeHandle* handle,
+                                                size_t index) {
+  if (!validate_handle(handle)) {
+    return NULL;
+  }
+
+  RimeCandidateListIterator iterator = {0};
+  if (!g_runtime.api->candidate_list_begin ||
+      !g_runtime.api->candidate_list_next ||
+      !g_runtime.api->candidate_list_end ||
+      !g_runtime.api->candidate_list_begin(handle->session_id, &iterator)) {
+    return NULL;
+  }
+
+  char* text = NULL;
+  for (size_t current_index = 0; current_index <= index; ++current_index) {
+    if (!g_runtime.api->candidate_list_next(&iterator)) {
+      break;
+    }
+
+    if (current_index == index) {
+      text = duplicate_string(iterator.candidate.text);
+      break;
+    }
+  }
+
+  g_runtime.api->candidate_list_end(&iterator);
   return text;
 }
 

@@ -28,6 +28,8 @@ void OneHandRimeBridgeClearComposition(OneHandRimeBridgeHandle* handle);
 bool OneHandRimeBridgeSelectCandidateOnCurrentPage(
     OneHandRimeBridgeHandle* handle,
     size_t index);
+bool OneHandRimeBridgeSelectCandidateAtIndex(OneHandRimeBridgeHandle* handle,
+                                             size_t index);
 bool OneHandRimeBridgeChangePage(OneHandRimeBridgeHandle* handle,
                                  bool backward);
 bool OneHandRimeBridgeIsAsciiMode(OneHandRimeBridgeHandle* handle);
@@ -41,6 +43,9 @@ char* OneHandRimeBridgeCopyPreedit(OneHandRimeBridgeHandle* handle);
 size_t OneHandRimeBridgeCandidateCount(OneHandRimeBridgeHandle* handle);
 char* OneHandRimeBridgeCopyCandidateAtIndex(OneHandRimeBridgeHandle* handle,
                                             size_t index);
+char* OneHandRimeBridgeCopyCandidateListAtIndex(
+    OneHandRimeBridgeHandle* handle,
+    size_t index);
 void OneHandRimeBridgeFreeString(char* value);
 
 #ifdef __cplusplus

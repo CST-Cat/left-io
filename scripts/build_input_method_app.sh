@@ -124,11 +124,15 @@ fi
 
 APP_ICON_PPM="$BUILD_DIR/app_icon.ppm"
 MENU_ICON_PNG="$RESOURCES_DIR/menu_icon.png"
-python3 - "$APP_ICON_PPM" "$MENU_ICON_PNG" <<'PY'
+MENU_ICON_PNG_2X="$RESOURCES_DIR/menu_icon@2x.png"
+MENU_ICON_PNG_4X="$BUILD_DIR/menu_icon@4x.png"
+MENU_ICON_TIFF="$RESOURCES_DIR/menu_icon.tiff"
+MENU_ICON_PDF="$RESOURCES_DIR/menu_icon@2x.pdf"
+python3 - "$APP_ICON_PPM" "$MENU_ICON_PNG" "$MENU_ICON_PNG_2X" "$MENU_ICON_PNG_4X" "$MENU_ICON_PDF" <<'PY'
 import sys
 from PIL import Image, ImageDraw
 
-app_path, menu_path = sys.argv[1:3]
+app_path, menu_path, menu_2x_path, menu_4x_path, menu_pdf_path = sys.argv[1:6]
 
 def write_ppm(path, width, height, pixel):
     with open(path, "w", encoding="ascii") as file:
@@ -168,19 +172,72 @@ def app_pixel(x, y):
 
     return (r, g, b)
 
+def menu_icon(size):
+    scale = size / 16
+    icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(icon)
+    ink = (0, 0, 0, 255)
+
+    # Template image: black alpha mask only. TIS recolors this for light,
+    # dark, selected, and Fn-picker contexts when TISIconIsTemplate is set.
+    draw.rounded_rectangle(
+        (round(4 * scale), round(3 * scale), round(6 * scale), round(12 * scale)),
+        radius=max(1, round(1 * scale)),
+        fill=ink,
+    )
+    draw.rounded_rectangle(
+        (round(4 * scale), round(10 * scale), round(10 * scale), round(12 * scale)),
+        radius=max(1, round(1 * scale)),
+        fill=ink,
+    )
+    return icon
+
+def write_menu_pdf(path):
+    # Match the system input methods that feed the Fn picker through
+    # TISIconLabels/CustomIcon: a valid PDF on a 28x36 canvas.
+    stream = "\n".join([
+        "0 0 0 rg",
+        "9 8 5 20 re f",
+        "9 8 12 5 re f",
+    ]) + "\n"
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 28 36] /Contents 4 0 R >>",
+        f"<< /Length {len(stream.encode('ascii'))} >>\nstream\n{stream}endstream",
+    ]
+    chunks = ["%PDF-1.3\n"]
+    offsets = [0]
+    for index, body in enumerate(objects, start=1):
+        offsets.append(sum(len(chunk.encode("ascii")) for chunk in chunks))
+        chunks.append(f"{index} 0 obj\n{body}\nendobj\n")
+    xref_offset = sum(len(chunk.encode("ascii")) for chunk in chunks)
+    chunks.append("xref\n0 5\n0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        chunks.append(f"{offset:010d} 00000 n \n")
+    chunks.append("trailer\n<< /Size 5 /Root 1 0 R >>\n")
+    chunks.append(f"startxref\n{xref_offset}\n%%EOF\n")
+    with open(path, "w", encoding="ascii") as file:
+        file.write("".join(chunks))
+
 write_ppm(app_path, 1024, 1024, app_pixel)
 
-icon = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
-draw = ImageDraw.Draw(icon)
-ink = (0, 0, 0, 255)
-
-# Use a single, small "L" with generous padding. This reads cleanly in
-# the menu bar and avoids the oversized multi-letter look in Settings.
-draw.rounded_rectangle((4, 3, 6, 12), radius=1, fill=ink)
-draw.rounded_rectangle((4, 10, 10, 12), radius=1, fill=ink)
-
-icon.save(menu_path)
+icon_16 = menu_icon(16)
+icon_32 = menu_icon(32)
+icon_64 = menu_icon(64)
+icon_16.save(menu_path)
+icon_32.save(menu_2x_path)
+icon_64.save(menu_4x_path)
+write_menu_pdf(menu_pdf_path)
 PY
+
+MENU_ICON_TIFF_1X="$BUILD_DIR/menu_icon_1x.tiff"
+MENU_ICON_TIFF_2X="$BUILD_DIR/menu_icon_2x.tiff"
+MENU_ICON_TIFF_4X="$BUILD_DIR/menu_icon_4x.tiff"
+sips -s format tiff -s dpiWidth 72 -s dpiHeight 72 "$MENU_ICON_PNG" --out "$MENU_ICON_TIFF_1X" >/dev/null
+sips -s format tiff -s dpiWidth 144 -s dpiHeight 144 "$MENU_ICON_PNG_2X" --out "$MENU_ICON_TIFF_2X" >/dev/null
+sips -s format tiff -s dpiWidth 288 -s dpiHeight 288 "$MENU_ICON_PNG_4X" --out "$MENU_ICON_TIFF_4X" >/dev/null
+tiffutil -cat "$MENU_ICON_TIFF_1X" "$MENU_ICON_TIFF_2X" "$MENU_ICON_TIFF_4X" -out "$MENU_ICON_TIFF" >/dev/null
 
 ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"
 rm -rf "$ICONSET_DIR"
@@ -257,17 +314,26 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
         <key>TISInputSourceID</key>
         <string>$MODE_ID</string>
         <key>tsInputModeAlternateMenuIconFileKey</key>
-        <string>menu_icon.png</string>
+        <string>menu_icon.tiff</string>
         <key>tsInputModeDefaultStateKey</key>
         <true/>
         <key>tsInputModeKeyEquivalentKey</key>
         <string></string>
         <key>tsInputModeKeyEquivalentModifiersKey</key>
         <integer>4608</integer>
+        <key>TISIconIsTemplate</key>
+        <true/>
+        <key>TISIconLabels</key>
+        <dict>
+          <key>Primary</key>
+          <string>L</string>
+          <key>CustomIcon</key>
+          <string>menu_icon@2x.pdf</string>
+        </dict>
         <key>tsInputModeMenuIconFileKey</key>
-        <string>menu_icon.png</string>
+        <string>menu_icon.tiff</string>
         <key>tsInputModePaletteIconFileKey</key>
-        <string>menu_icon.png</string>
+        <string>menu_icon.tiff</string>
         <key>tsInputModeCharacterRepertoireKey</key>
         <array>
           <string>Hans</string>
@@ -313,7 +379,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>Latn</string>
   </array>
   <key>tsInputMethodIconFileKey</key>
-  <string>menu_icon.png</string>
+  <string>menu_icon.tiff</string>
 </dict>
 </plist>
 PLIST

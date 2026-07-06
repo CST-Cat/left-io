@@ -996,3 +996,257 @@ io.github.cstcat.inputmethod.leftio | - | LeftIO | enabled=1 | selectCapable=0
 ```
 
 注意：第二行 parent source 是正常结构，不是第二个输入法。真正要避免的是两个 `LeftIO 单手九宫格` mode。
+
+### 18.13 2026-07-05 菜单栏/Fn 选择器里的 LeftIO 图标发糊或不反色
+
+症状：
+
+- 右上角输入法菜单里 `L` 看起来发糊。
+- Fn 输入法选择浮层里偶尔像是“不显示”。
+- 菜单栏选中 LeftIO 后，`L` 仍然是黑色，没有像系统输入法一样在选中/深色背景上变浅。
+
+根因拆开看：
+
+1. 之前只生成一个 `16x16 menu_icon.png`。在 Retina 菜单栏、Fn 选择器或系统设置里被放大时必然发糊。
+2. `TISIconIsTemplate` 只放在输入法顶层，mode 自己的 `tsInputModeMenuIconFileKey` 没有明确 template 标记。部分 TIS/IMK 场景会把它当普通彩色 PNG 画出来，于是选中后仍是黑色。
+3. Fn 选择器和部分系统输入源 UI 更像系统内置输入法那样读取 `TISIconLabels/CustomIcon`，只给 PNG 不够稳。
+4. 手写 PDF 时如果 `/Length` 或 page box 不对，CoreGraphics 可能仍能把它识别成 PDF 文件，但 Fn 选择器不会稳定显示。可用 `sips -g pixelWidth -g pixelHeight` 提前发现这类解析错误。
+
+本轮改法：
+
+- 继续保留 `menu_icon.png`，并新增 `menu_icon@2x.png`。
+- 新增多表示 `menu_icon.tiff`，包含 16/32/64px 三个 representation，DPI 分别为 72/144/288，让它们都表示同一个 16pt 菜单栏图标，避免 Retina 放大糊。
+- 新增矢量 `menu_icon@2x.pdf`，画布为 `28x36`，给 `TISIconLabels/CustomIcon` 使用；这个命名和尺寸对齐系统内置 Ainu 输入法的做法。
+- 在 `TISIconLabels` 里同时写入 `Primary = L`，作为 Fn 选择器不吃 custom PDF 时的文字兜底。
+- `tsInputMethodIconFileKey`、`tsInputModeMenuIconFileKey`、`tsInputModeAlternateMenuIconFileKey`、`tsInputModePaletteIconFileKey` 全部改为 `menu_icon.tiff`。
+- 在 mode 级也增加 `TISIconIsTemplate = true`。
+
+验证口径：
+
+```sh
+LEFTIO_SKIP_LIBRIME_BOOTSTRAP=1 scripts/build_input_method_app.sh
+scripts/install_input_method_app.sh
+make verify-input-method
+```
+
+构建时 `tiffutil` 不应再提示 point size 不一致；`Info.plist` 里必须同时看到：
+
+```text
+TISIconIsTemplate = true
+tsInputMethodIconFileKey = menu_icon.tiff
+mode.TISIconIsTemplate = true
+mode.TISIconLabels.Primary = L
+mode.TISIconLabels.CustomIcon = menu_icon@2x.pdf
+mode.tsInputModeMenuIconFileKey = menu_icon.tiff
+```
+
+安装后如果菜单栏仍显示旧黑图标，优先认为是 TIS/菜单栏缓存。可先轻量刷新：
+
+```sh
+pkill -x TextInputMenuAgent
+pkill -x TextInputSwitcher
+pkill -x imklaunchagent
+pkill -x LeftIO
+```
+
+然后重新切回 `LeftIO 单手九宫格` 测试。仍不刷新时再考虑注销/重新登录。
+
+### 18.14 2026-07-06 候选窗编号缺失、假编号和自绘候选窗边界
+
+用户目标很明确：候选窗只显示 4 个候选，但每个候选仍然要有 `1 2 3 4` 选择标号；视觉要接近 macOS 自带输入法，小数字、圆角、背景、整体质感都要自然。
+
+这轮踩坑很多，核心教训是：`IMKCandidates` 是系统候选窗，但它不等于一定能得到系统输入法同款视觉和 selection key 标注。
+
+踩过的坑：
+
+1. 只改源码、不重新打包安装是无效验证。
+   `swift build` 只更新 `.build/...` 里的调试产物，不会让 macOS 正在加载的 `~/Library/Input Methods/LeftIO.app` 自动变化。每次输入法 UI 行为验证前，必须跑：
+
+   ```sh
+   scripts/build_input_method_app.sh
+   scripts/install_input_method_app.sh
+   ```
+
+   然后用 `stat` / `codesign -dv` 确认安装目录的时间和 CDHash 确实更新。
+
+2. `IMKCandidates.setSelectionKeys([18,19,20,21])` 并不保证视觉上显示 `1234`。
+   运行日志已经证实过：
+
+   ```text
+   candidateWindow show count=4 panel=3 selectionKeys=[18, 19, 20, 21]
+   ```
+
+   这里 `panel=3` 是 `kIMKSingleRowSteppingCandidatePanel`，selection keys 也已经进去了，但当前系统上的候选窗仍然不画编号。问题不在“配置没进”，而是这条 IMKCandidates 渲染路径不显示 selection key 标注。
+
+3. `setCandidateData` 里塞 `NSAttributedString("1 候选")` 会变成假编号。
+   虽然能看到数字，但数字已经成为候选文本的一部分。即使点击候选时再把前缀剥掉，视觉上仍然像 `1发` / `2分` 这种“假候选正文”，和系统输入法的小标号不是一回事。
+
+4. 透明占位 + overlay 也失败。
+   方案曾经尝试：候选文本前留透明数字占位，再用单独 `NSPanel` 把数字贴在 IMKCandidates 上。实际问题：
+
+   - IMKCandidates 的选中态可能忽略或重绘透明属性，导致 `1阿` 仍然露出来。
+   - `IMKCandidates.candidateFrame()` 返回的位置不适合拿来贴 overlay，出现数字跑到底部的现象。
+   - 这类 overlay 是两个窗口硬叠，和候选窗生命周期/坐标系不稳定。
+
+5. “原生”要区分两层含义。
+   `IMKCandidates` 是 InputMethodKit 自带候选窗，但当前无法满足 1234 标注和视觉要求。
+   现在的候选窗是 LeftIO 自己创建的 AppKit 候选面板：
+
+   - `NSPanel`
+   - `NSVisualEffectView`
+   - `NSStackView`
+   - `NSTextField`
+   - `IMKTextInput.attributes(forCharacterIndex:lineHeightRectangle:)` 定位
+
+   它不是第三方库，也不是往正文里插数字再删除；但它也不是系统 `IMKCandidates`。
+
+当前方向：
+
+- 组合区/正文只保留真实输入和真实候选，不把编号写进 marked text。
+- 候选窗由 LeftIO 输入法进程用 AppKit 画。
+- 单行 compact 状态按 `1 2 3 4` 展示 4 个候选。
+- 数字和候选字是两个 label，不再把数字拼进候选字符串。
+- 视觉要继续按 macOS 自带输入法调：白色 popover 材质、细边框、柔和阴影、小号数字、较轻字重、右侧分隔线/箭头。
+
+验收标准：
+
+- 按 `1-4` 提交真实候选。
+- 候选文本里不能出现被提交的 `1候选` / `2候选`。
+- 不应有底部漂浮数字、重复数字、候选窗和编号错位。
+- 每次 UI 修改后必须重新打包安装，不要只看 `swift build`。
+
+### 18.15 2026-07-06 翻页展开不是把 4 个候选横向拉宽
+
+用户期望的翻页/展开效果类似 macOS 自带输入法：按翻页键后出现多行候选面板，而不是单行候选条变宽。
+
+踩坑：
+
+1. 右侧箭头一开始只是视觉装饰，没有绑定展开状态。
+   所以按 `F/G` 只会让后端翻页，UI 仍然是 compact 单行。这个是“假交互”，必须避免。
+
+2. 直接把 expanded 面板宽度拉大，但仍只喂 `displayedCandidates`，会变成假展开。
+   `displayedCandidates` 按 LeftIO 设计只是一页 4 个候选；拿这 4 个去画 expanded，就会出现一条很宽的面板里只有 4 个候选。
+
+3. `menu/page_size: 4` 是正确设计，不应该为了展开面板改成 30。
+   LeftIO 的选择模型是 `1-4`，所以展开也应该按 4 列组织。不能照搬系统拼音 6 列/30 个候选。
+
+4. 30 个候选不是 4 的倍数。
+   这是错误设定。展开候选数量必须是 4 的倍数。当前选择 `24`：4 列 x 最多 6 行。
+
+5. Rime `candidate_list_from_index` 不能随便直接读 `iterator.candidate` 就认为拿到了全量候选。
+   曾出现日志：
+
+   ```text
+   candidatePanel show count=4 requestedPresentation=expanded ...
+   ```
+
+   这说明 expanded 状态触发了，但全量候选实际仍只有 4 个。原因是 iterator 接法不对。
+
+当前修正方向：
+
+- 在 C bridge 暴露全量候选读取接口。
+- 使用标准迭代流程：
+
+  ```text
+  candidate_list_begin
+  candidate_list_next
+  candidate_list_end
+  ```
+
+  逐个拉取前 24 个真实候选，而不是只拿当前页 4 个。
+
+- Swift session 新增 `expandedCandidates`：
+
+  - Rime session：通过 candidate iterator 取前 24 个。
+  - Lexicon fallback：从 `allCandidates.prefix(24)` 取。
+  - Recording session：提供空数组兜底。
+
+- UI presentation 分两种：
+
+  ```text
+  compact  -> 4 个候选单行
+  expanded -> expandedCandidates 按 4 列 x 最多 6 行
+  ```
+
+- `F/G` 对应 `.pageUp` / `.pageDown` 后切到 expanded。
+- 输入新编码、插入分隔符、删除、选词、提交、取消后收回 compact。
+- 如果 `expandedCandidates.count <= displayedCandidates.count`，不要假展开，继续显示 compact。
+
+验收口径：
+
+- 按 `G/F` 后日志应看到：
+
+  ```text
+  requestedPresentation=expanded effectivePresentation=expanded count>4
+  ```
+
+- 如果日志是：
+
+  ```text
+  requestedPresentation=expanded effectivePresentation=compact count=4
+  ```
+
+  说明当前编码/Rime iterator 只给到了 4 个候选，UI 不应该拉宽假装展开。
+
+- 展开面板必须是 4 列，不是 6 列。
+- 展开候选来自 Rime candidate iterator 的真实候选，不是重复当前页，也不是 UI 假补齐。
+
+### 18.16 2026-07-06 展开态不能继续只做 Rime 翻页，也不能每次只看第一行
+
+后续实测又暴露两个问题：
+
+1. 有时候会出现一个空的 expanded 半透明外壳。
+   日志里能看到 compact 状态却沿用 expanded 高度：
+
+   ```text
+   candidatePanel show count=4 requestedPresentation=compact effectivePresentation=compact frame=(221.0, -89.0, 262.0, 206.0)
+   candidatePanel show count=4 requestedPresentation=compact effectivePresentation=compact frame=(221.0, -45.0, 262.0, 162.0)
+   ```
+
+   这不是视觉参数问题，而是 `NSPanel` / `NSVisualEffectView` / 内容视图的 frame 没有在同一轮更新里归一。
+   只在 `CandidatePanelContentView.configure()` 里改内部 frame，AppKit 会让外层窗口残留旧高度，产生空壳。
+
+   修正要点：
+
+   - `configure()` 只重建内容并标记 `needsLayout`。
+   - `CandidateWindowController.update()` 统一计算目标 size。
+   - 同一轮里设置 `panel.frame`、`panel.contentView?.frame`、`contentView.frame`。
+   - 最后 `layoutSubtreeIfNeeded()` 和 `displayIfNeeded()`，不要等下一轮 layout 自己追上。
+
+2. `F/G` 不能只继续调用 Rime 的 `.pageUp` / `.pageDown`。
+   旧逻辑里连续按 `G` 的日志是：
+
+   ```text
+   candidatePanel show count=24 requestedPresentation=expanded effectivePresentation=expanded frame=(221.0, 149.0, 312.0, 250.0)
+   actions=[OneHand.OneHandAction.pageDown]
+   candidatePanel show count=24 requestedPresentation=expanded effectivePresentation=expanded frame=(221.0, 149.0, 312.0, 250.0)
+   ```
+
+   count、frame、候选窗口起点都没变，所以用户看到的是“只能展开一次，不能下一行/上一行”。
+
+第二轮又踩了一个坑：把 `G/F` 做成 `expandedCandidateStartIndex += 4/-=4` 仍然不对。
+这会导致视觉上永远只是在看“当前窗口第一行”，用户没法在同一个展开页里看第 2、3、4、5、6 行。
+
+正确模型要拆成两个状态：
+
+- `expandedCandidateStartIndex`：当前展开页起点，按 24 个候选一页移动。
+- `expandedActiveRowIndex`：当前展开页里的活动行，按 4 个候选一行移动。
+- `G`：先 `expandedActiveRowIndex += 1`。
+- `F`：先 `expandedActiveRowIndex -= 1`。
+- 只有活动行越过当前展开页底部/顶部时，才把 `expandedCandidateStartIndex` 切到下一页/上一页。
+- 展开态按 `1-4` 时，提交索引应该是：
+
+  ```text
+  expandedCandidateStartIndex + expandedActiveRowIndex * 4 + digitIndex
+  ```
+
+- C bridge 需要暴露 librime 的 `select_candidate(session, index)`，Swift session 再提供 `commitExpandedCandidate(at:)`。
+
+验收口径：
+
+- 连续按 `G` 时，日志里的 `activeRow` 应该先按 `1, 2, 3...` 变化，`expandedStart` 在到达当前展开页底部前不应该变化。
+- 只有越过当前展开页底部/顶部时，`expandedStart` 才按 `24` 的步长翻到下一页/上一页。
+- 按 `F` 时，`activeRow` 应该先回退；到第 0 行再按才回上一页。
+- compact/expanded 来回切时 compact 高度应该直接回到 `44`，不能再出现 `206 -> 162 -> 118 -> 74 -> 44` 这种旧高度逐步回落。
+- 展开态最后一行即使不足 4 个候选，也仍然应该显示 expanded，而不是被误判回 compact。
+- 如果总候选数不超过 4，按 `F/G` 不应该假展开。

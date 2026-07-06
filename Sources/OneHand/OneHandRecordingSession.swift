@@ -6,6 +6,7 @@ public final class OneHandRecordingSession: OneHandSession {
     public private(set) var clientActions: [OneHandClientAction]
     public var compositionText = ""
     public var displayedCandidates: [String] = []
+    public var expandedCandidates: [String] = []
 
     public init(
         context: OneHandContext = OneHandContext(),
@@ -32,6 +33,18 @@ public final class OneHandRecordingSession: OneHandSession {
 
     public func commitDisplayedCandidate(matching text: String) {}
 
+    public func expandedCandidateWindow(startingAt startIndex: Int, limit: Int) -> [String] {
+        guard startIndex >= 0,
+              limit > 0,
+              startIndex < expandedCandidates.count else {
+            return []
+        }
+
+        return Array(expandedCandidates[startIndex..<min(startIndex + limit, expandedCandidates.count)])
+    }
+
+    public func commitExpandedCandidate(at index: Int) {}
+
     public func setAsciiMode(_ enabled: Bool) {
         context.isAsciiMode = enabled
     }
@@ -40,6 +53,7 @@ public final class OneHandRecordingSession: OneHandSession {
         context = OneHandContext()
         compositionText = ""
         displayedCandidates.removeAll()
+        expandedCandidates.removeAll()
         resetActions()
     }
 

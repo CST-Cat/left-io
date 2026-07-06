@@ -99,6 +99,35 @@ final class OneHandRimeSessionTests: XCTestCase {
         XCTAssertTrue(session.displayedCandidates.isEmpty)
         XCTAssertEqual(bridge.clearCompositionCalls, 1)
     }
+
+    func testExpandedCandidateWindowReadsFromAbsoluteCandidateListIndex() {
+        let bridge = FakeOneHandRimeBridge(
+            input: "2",
+            preedit: "2",
+            candidates: (1...12).map { "候选\($0)" }
+        )
+        let session = OneHandRimeSession(bridge: bridge)
+
+        XCTAssertEqual(
+            session.expandedCandidateWindow(startingAt: 4, limit: 4),
+            ["候选5", "候选6", "候选7", "候选8"]
+        )
+    }
+
+    func testCommitExpandedCandidateSelectsAbsoluteCandidateIndex() {
+        let bridge = FakeOneHandRimeBridge(
+            input: "2",
+            preedit: "2",
+            candidates: (1...8).map { "候选\($0)" }
+        )
+        let session = OneHandRimeSession(bridge: bridge)
+
+        session.commitExpandedCandidate(at: 5)
+
+        XCTAssertEqual(bridge.selectedAbsoluteIndices, [5])
+        XCTAssertEqual(session.takeClientActions(), [.insertText("候选6")])
+        XCTAssertTrue(session.displayedCandidates.isEmpty)
+    }
 }
 
 private final class FakeOneHandRimeBridge: OneHandRimeBridgeClient {
@@ -110,6 +139,7 @@ private final class FakeOneHandRimeBridge: OneHandRimeBridgeClient {
 
     var setInputs: [String] = []
     var selectedIndices: [Int] = []
+    var selectedAbsoluteIndices: [Int] = []
     var changePageCalls: [Bool] = []
     var clearCompositionCalls = 0
 
@@ -156,6 +186,16 @@ private final class FakeOneHandRimeBridge: OneHandRimeBridgeClient {
         return true
     }
 
+    func selectCandidate(at index: Int) -> Bool {
+        selectedAbsoluteIndices.append(index)
+        guard candidates.indices.contains(index) else {
+            return false
+        }
+        pendingCommit = candidates[index]
+        clearComposition()
+        return true
+    }
+
     func changePage(backward: Bool) -> Bool {
         changePageCalls.append(backward)
         return true
@@ -192,5 +232,9 @@ private final class FakeOneHandRimeBridge: OneHandRimeBridgeClient {
             return nil
         }
         return candidates[index]
+    }
+
+    func copyCandidateListCandidate(at index: Int) -> String? {
+        copyCandidate(at: index)
     }
 }

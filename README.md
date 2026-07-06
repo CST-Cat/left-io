@@ -6,6 +6,10 @@ LeftIO is a macOS one-hand T9-style Chinese input method experiment.
 
 The current repository contains a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an InputMethodKit host, and both a real librime-backed session bridge and a lightweight lexicon fallback session. The host prefers librime when it can be loaded at runtime and falls back to the bundled dictionary-backed session otherwise. On macOS 26, the distributable is a single `LeftIO.app` container with an embedded input-method extension, and the DMG exposes that app together with an `Applications` shortcut for direct drag-and-drop installation.
 
+## License
+
+LeftIO's original source code and documentation are licensed under the BSD 3-Clause License. The bundled/generated Rime dictionary data is derived from Rime `luna_pinyin` and `essay` data and is licensed under LGPL-3.0-only. See [LICENSE](LICENSE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and [LICENSES/](LICENSES/).
+
 ## Keyboard Layout
 
 ```text
@@ -305,6 +309,10 @@ For the bundled Rime data, generate the production table from `luna_pinyin`:
 ```sh
 python3 scripts/generate_onehand_t9_dict.py vendor/librime/data/minimal/luna_pinyin.dict.yaml > data/onehand_t9.dict.yaml
 ```
+
+The production table is derived from upstream Rime `luna_pinyin` and `essay`
+data and is distributed under LGPL-3.0-only. Keep the generated header comments
+intact when redistributing `data/onehand_t9.dict.yaml`.
 
 When `essay.txt` exists next to the input dictionary, the generator uses its real
 Rime frequencies for weights and derives phrase rows from single-character Rime

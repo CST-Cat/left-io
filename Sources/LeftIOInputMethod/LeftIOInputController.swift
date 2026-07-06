@@ -12,12 +12,20 @@ final class LeftIOInputController: IMKInputController {
         session: session,
         configuration: Self.loadConfiguration()
     )
-    private let candidateWindowController = CandidateWindowController()
+    private lazy var candidateWindowController = MainActor.assumeIsolated {
+        CandidateWindowController()
+    }
     private let modeIndicatorController = ModeIndicatorController()
     private var hasMarkedText = false
     private var pendingShiftToggle = false
     private var lastShiftToggleUptime: TimeInterval = 0
     private var localAsciiMode = false
+    private var candidatePanelPresentation: CandidatePanelPresentation = .compact
+    private var expandedCandidateStartIndex = 0
+    private var expandedActiveRowIndex = 0
+
+    private static let expandedCandidateColumnCount = 4
+    private static let expandedCandidateVisibleLimit = 24
 
     override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
@@ -117,6 +125,7 @@ final class LeftIOInputController: IMKInputController {
         hasMarkedText = false
         pendingShiftToggle = false
         localAsciiMode = false
+        collapseCandidatePanel()
         super.deactivateServer(sender)
     }
 
@@ -130,6 +139,7 @@ final class LeftIOInputController: IMKInputController {
         hasMarkedText = false
         pendingShiftToggle = false
         localAsciiMode = false
+        collapseCandidatePanel()
         super.inputControllerWillClose()
     }
 
@@ -139,6 +149,7 @@ final class LeftIOInputController: IMKInputController {
         }
 
         session.commitDisplayedCandidate(matching: candidateString.string)
+        collapseCandidatePanel()
         if let client = client() {
             synchronizeClientState(client: client)
         }
@@ -235,6 +246,7 @@ final class LeftIOInputController: IMKInputController {
             _ = oneHandController.cancelTransientState()
             session.reset()
             hasMarkedText = false
+            collapseCandidatePanel()
             hideCandidateWindow()
             perform(.deleteBackward, client: sender)
             Self.writeInputLog(
@@ -245,7 +257,19 @@ final class LeftIOInputController: IMKInputController {
 
         cancelStalePendingSpaceIfNeeded(before: mappedEvent)
 
+        if handleCandidatePanelShortcut(
+            mappedEvent,
+            source: source,
+            keyCode: keyCode,
+            characters: characters,
+            charactersIgnoringModifiers: charactersIgnoringModifiers,
+            client: sender
+        ) {
+            return true
+        }
+
         let result = oneHandController.handle(mappedEvent)
+        updateCandidatePanelPresentation(after: result.actions, event: mappedEvent)
         synchronizeClientState(client: sender)
         Self.writeInputLog(
             "\(source) keyCode=\(keyCodeDescription(keyCode)) chars=\(characters ?? "-") charsIgnoring=\(charactersIgnoringModifiers ?? "-") key=\(mappedEvent.key.rawValue) phase=\(mappedEvent.phase) mods=\(mappedEvent.modifiers.rawValue) localAscii=false sessionAscii=\(session.context.isAsciiMode) actions=\(result.actions) consumed=\(result.isConsumed)"
@@ -268,6 +292,7 @@ final class LeftIOInputController: IMKInputController {
 
         if hasMarkedText || session.context.isComposing {
             let result = oneHandController.handle(.init(key: .r, phase: .down))
+            updateCandidatePanelPresentation(after: result.actions, event: .init(key: .r, phase: .down))
             synchronizeClientState(client: sender)
             Self.writeInputLog(
                 "eventTapR routed key=R hasMarkedText=\(hasMarkedText) sessionComposing=\(session.context.isComposing) actions=\(result.actions) consumed=\(result.isConsumed)"
@@ -277,9 +302,177 @@ final class LeftIOInputController: IMKInputController {
 
         _ = oneHandController.cancelTransientState()
         session.reset()
+        collapseCandidatePanel()
         hideCandidateWindow()
         perform(.deleteBackward, client: sender)
         Self.writeInputLog("eventTapR directClientDelete")
+    }
+
+    private func updateCandidatePanelPresentation(
+        after actions: [OneHandAction],
+        event: OneHandKeyEvent
+    ) {
+        guard event.phase == .down else {
+            return
+        }
+
+        if actions.contains(.pageUp) || actions.contains(.pageDown) {
+            candidatePanelPresentation = .expanded
+            expandedCandidateStartIndex = clampExpandedCandidateStartIndex(expandedCandidateStartIndex)
+            clampExpandedActiveRowIndex()
+            return
+        }
+
+        if actions.contains(where: Self.collapsesCandidatePanel) {
+            collapseCandidatePanel()
+        }
+    }
+
+    private func handleCandidatePanelShortcut(
+        _ mappedEvent: OneHandKeyEvent,
+        source: String,
+        keyCode: UInt16?,
+        characters: String?,
+        charactersIgnoringModifiers: String?,
+        client sender: Any
+    ) -> Bool {
+        guard mappedEvent.phase == .down,
+              session.context.hasCandidates,
+              !isPhysicalSpaceDown() else {
+            return false
+        }
+
+        if mappedEvent.key == .f || mappedEvent.key == .g {
+            moveExpandedCandidateWindow(backward: mappedEvent.key == .f)
+            updateCandidates()
+            Self.writeInputLog(
+                "\(source) candidatePanelNavigate keyCode=\(keyCodeDescription(keyCode)) chars=\(characters ?? "-") charsIgnoring=\(charactersIgnoringModifiers ?? "-") key=\(mappedEvent.key.rawValue) start=\(expandedCandidateStartIndex) activeRow=\(expandedActiveRowIndex)"
+            )
+            return true
+        }
+
+        guard candidatePanelPresentation == .expanded,
+              let selectionIndex = mappedEvent.key.candidateIndex else {
+            return false
+        }
+
+        let candidateIndex = expandedCandidateStartIndex
+            + expandedActiveRowIndex * Self.expandedCandidateColumnCount
+            + selectionIndex
+        guard !session.expandedCandidateWindow(startingAt: candidateIndex, limit: 1).isEmpty else {
+            return true
+        }
+
+        session.commitExpandedCandidate(at: candidateIndex)
+        collapseCandidatePanel()
+        synchronizeClientState(client: sender)
+        Self.writeInputLog(
+            "\(source) candidatePanelSelectExpanded keyCode=\(keyCodeDescription(keyCode)) key=\(mappedEvent.key.rawValue) candidateIndex=\(candidateIndex)"
+        )
+        return true
+    }
+
+    private func moveExpandedCandidateWindow(backward: Bool) {
+        candidatePanelPresentation = .expanded
+        expandedCandidateStartIndex = clampExpandedCandidateStartIndex(expandedCandidateStartIndex)
+
+        let visibleCandidates = session.expandedCandidateWindow(
+            startingAt: expandedCandidateStartIndex,
+            limit: Self.expandedCandidateVisibleLimit
+        )
+        let visibleRowCount = expandedVisibleRowCount(for: visibleCandidates.count)
+        guard visibleRowCount > 0 else {
+            expandedActiveRowIndex = 0
+            return
+        }
+
+        expandedActiveRowIndex = min(expandedActiveRowIndex, visibleRowCount - 1)
+        if backward {
+            if expandedActiveRowIndex > 0 {
+                expandedActiveRowIndex -= 1
+                return
+            }
+
+            let previousStartIndex = expandedCandidateStartIndex - Self.expandedCandidateVisibleLimit
+            guard previousStartIndex >= 0 else {
+                expandedActiveRowIndex = 0
+                return
+            }
+
+            expandedCandidateStartIndex = previousStartIndex
+            let previousCandidates = session.expandedCandidateWindow(
+                startingAt: expandedCandidateStartIndex,
+                limit: Self.expandedCandidateVisibleLimit
+            )
+            expandedActiveRowIndex = max(expandedVisibleRowCount(for: previousCandidates.count) - 1, 0)
+            return
+        }
+
+        let nextRowStartInWindow = (expandedActiveRowIndex + 1) * Self.expandedCandidateColumnCount
+        if nextRowStartInWindow < visibleCandidates.count {
+            expandedActiveRowIndex += 1
+            return
+        }
+
+        let nextStartIndex = expandedCandidateStartIndex + Self.expandedCandidateVisibleLimit
+        if session.expandedCandidateWindow(startingAt: nextStartIndex, limit: 1).isEmpty {
+            expandedActiveRowIndex = visibleRowCount - 1
+        } else {
+            expandedCandidateStartIndex = nextStartIndex
+            expandedActiveRowIndex = 0
+        }
+    }
+
+    private func clampExpandedCandidateStartIndex(_ startIndex: Int) -> Int {
+        let alignedStartIndex = max(0, startIndex / Self.expandedCandidateVisibleLimit * Self.expandedCandidateVisibleLimit)
+        guard !session.expandedCandidateWindow(startingAt: alignedStartIndex, limit: 1).isEmpty else {
+            return 0
+        }
+
+        return alignedStartIndex
+    }
+
+    private func clampExpandedActiveRowIndex() {
+        let visibleCandidates = session.expandedCandidateWindow(
+            startingAt: expandedCandidateStartIndex,
+            limit: Self.expandedCandidateVisibleLimit
+        )
+        let visibleRowCount = expandedVisibleRowCount(for: visibleCandidates.count)
+        guard visibleRowCount > 0 else {
+            expandedActiveRowIndex = 0
+            return
+        }
+
+        expandedActiveRowIndex = min(max(expandedActiveRowIndex, 0), visibleRowCount - 1)
+    }
+
+    private func expandedVisibleRowCount(for candidateCount: Int) -> Int {
+        guard candidateCount > 0 else {
+            return 0
+        }
+
+        return Int(ceil(Double(candidateCount) / Double(Self.expandedCandidateColumnCount)))
+    }
+
+    private func collapseCandidatePanel() {
+        candidatePanelPresentation = .compact
+        expandedCandidateStartIndex = 0
+        expandedActiveRowIndex = 0
+    }
+
+    private static func collapsesCandidatePanel(_ action: OneHandAction) -> Bool {
+        switch action {
+        case .inputT9Code,
+             .insertSyllableDelimiter,
+             .deleteBackward,
+             .selectCandidate,
+             .commitFirstCandidate,
+             .commitComposition,
+             .cancelComposition:
+            true
+        default:
+            false
+        }
     }
 
     fileprivate func handleEventTapKey(
@@ -348,6 +541,7 @@ final class LeftIOInputController: IMKInputController {
             clearMarkedText(client: sender)
             hasMarkedText = false
         }
+        collapseCandidatePanel()
         hideCandidateWindow()
         perform(action, client: sender)
         Self.writeInputLog(
@@ -452,14 +646,18 @@ final class LeftIOInputController: IMKInputController {
     private func cancelStalePendingSpaceIfNeeded(before event: OneHandKeyEvent) {
         guard event.phase == .down,
               event.key != .space,
-              !CGEventSource.keyState(
-                .combinedSessionState,
-                key: CGKeyCode(kVK_Space)
-              ) else {
+              !isPhysicalSpaceDown() else {
             return
         }
 
         _ = oneHandController.cancelPendingSpace()
+    }
+
+    private func isPhysicalSpaceDown() -> Bool {
+        CGEventSource.keyState(
+            .combinedSessionState,
+            key: CGKeyCode(kVK_Space)
+        )
     }
 
     private func perform(_ action: OneHandClientAction, client sender: Any) {
@@ -473,10 +671,44 @@ final class LeftIOInputController: IMKInputController {
 
     private func updateCandidates() {
         let candidates = session.displayedCandidates
+        if candidates.isEmpty {
+            collapseCandidatePanel()
+        }
+
+        var expandedCandidates: [String]
+        if candidatePanelPresentation == .expanded {
+            expandedCandidateStartIndex = clampExpandedCandidateStartIndex(expandedCandidateStartIndex)
+            expandedCandidates = session.expandedCandidateWindow(
+                startingAt: expandedCandidateStartIndex,
+                limit: Self.expandedCandidateVisibleLimit
+            )
+            if expandedCandidateStartIndex == 0,
+               expandedCandidates.count <= candidates.count {
+                collapseCandidatePanel()
+                expandedCandidates = []
+            } else {
+                clampExpandedActiveRowIndex()
+            }
+        } else {
+            expandedCandidates = []
+        }
+
         let controller = candidateWindowController
+        let inputClient = client()
         let imkServer = server()
+        let presentation = candidatePanelPresentation
+        let expandedStartIndex = expandedCandidateStartIndex
+        let expandedActiveRowIndex = expandedActiveRowIndex
         MainActor.assumeIsolated {
-            controller.update(candidates: candidates, server: imkServer)
+            controller.update(
+                candidates: candidates,
+                expandedCandidates: expandedCandidates,
+                expandedStartIndex: expandedStartIndex,
+                expandedActiveRowIndex: expandedActiveRowIndex,
+                presentation: presentation,
+                server: imkServer,
+                client: inputClient
+            )
         }
     }
 
@@ -881,49 +1113,380 @@ final class RKeyEventTap {
 }
 
 @MainActor
-private final class CandidateWindowController {
-    private var cachedCandidateWindow: IMKCandidates?
+private enum CandidatePanelPresentation {
+    case compact
+    case expanded
+}
 
-    func update(candidates: [String], server: IMKServer?) {
-        guard !candidates.isEmpty else {
+@MainActor
+private final class CandidateWindowController {
+    private var panel: NSPanel?
+    private let contentView = CandidatePanelContentView()
+
+    func update(
+        candidates: [String],
+        expandedCandidates: [String],
+        expandedStartIndex: Int,
+        expandedActiveRowIndex: Int,
+        presentation: CandidatePanelPresentation,
+        server: IMKServer?,
+        client: (any IMKTextInput)?
+    ) {
+        let visibleCandidates: [String]
+        let effectivePresentation: CandidatePanelPresentation
+        if presentation == .expanded,
+           !expandedCandidates.isEmpty,
+           (expandedStartIndex > 0 || expandedCandidates.count > candidates.count) {
+            visibleCandidates = expandedCandidates
+            effectivePresentation = .expanded
+        } else {
+            visibleCandidates = candidates
+            effectivePresentation = .compact
+        }
+
+        guard !visibleCandidates.isEmpty else {
             hide()
             return
         }
 
-        let candidateWindow: IMKCandidates
-        if let existingWindow = cachedCandidateWindow {
-            candidateWindow = existingWindow
-        } else {
-            guard let server,
-                  let newWindow = IMKCandidates(
-                    server: server,
-                    panelType: kIMKSingleRowSteppingCandidatePanel
-                  ) else {
-                return
-            }
-            newWindow.setSelectionKeys([
-                NSNumber(value: 18),
-                NSNumber(value: 19),
-                NSNumber(value: 20),
-                NSNumber(value: 21)
-            ])
-            newWindow.setAttributes([
-                IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)
-            ])
-            self.cachedCandidateWindow = newWindow
-            candidateWindow = newWindow
-        }
-
-        candidateWindow.setCandidateData(candidates)
-        if candidateWindow.isVisible() {
-            candidateWindow.update()
-        } else {
-            candidateWindow.show(kIMKLocateCandidatesBelowHint)
-        }
+        let panel = panel ?? makePanel()
+        self.panel = panel
+        contentView.configure(
+            candidates: visibleCandidates,
+            presentation: effectivePresentation,
+            highlightedRowIndex: expandedActiveRowIndex
+        )
+        let size = contentView.preferredPanelSize
+        let frame = NSRect(origin: origin(for: size, client: client), size: size)
+        panel.setFrame(frame, display: false)
+        panel.contentView?.frame = NSRect(origin: .zero, size: size)
+        contentView.frame = NSRect(origin: .zero, size: size)
+        contentView.needsLayout = true
+        contentView.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        panel.orderFrontRegardless()
+        LeftIOInputController.writeInputLog(
+            "candidatePanel show count=\(visibleCandidates.count) expandedStart=\(expandedStartIndex) activeRow=\(expandedActiveRowIndex) requestedPresentation=\(presentation) effectivePresentation=\(effectivePresentation) frame=\(panel.frame)"
+        )
     }
 
     func hide() {
-        cachedCandidateWindow?.hide()
+        panel?.orderOut(nil)
+    }
+
+    private func makePanel() -> NSPanel {
+        let effectView = NSVisualEffectView()
+        effectView.material = .popover
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = 13
+        effectView.layer?.borderWidth = 0.5
+        effectView.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.38).cgColor
+        effectView.layer?.masksToBounds = true
+        contentView.autoresizingMask = [.width, .height]
+        effectView.addSubview(contentView)
+
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: contentView.preferredPanelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = effectView
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = false
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        return panel
+    }
+
+    private func origin(for panelSize: NSSize, client: (any IMKTextInput)?) -> NSPoint {
+        var lineRect = NSRect.zero
+        _ = client?.attributes(forCharacterIndex: 0, lineHeightRectangle: &lineRect)
+        if lineRect.width > 0 || lineRect.height > 0 {
+            return clampedOrigin(anchorRect: lineRect, panelSize: panelSize)
+        }
+
+        let mouseLocation = NSEvent.mouseLocation
+        let fallbackAnchor = NSRect(x: mouseLocation.x, y: mouseLocation.y, width: 1, height: 1)
+        return clampedOrigin(anchorRect: fallbackAnchor, panelSize: panelSize)
+    }
+
+    private func clampedOrigin(anchorRect: NSRect, panelSize: NSSize) -> NSPoint {
+        let screen = NSScreen.screens.first { screen in
+            screen.frame.intersects(anchorRect)
+        } ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
+        let gap: CGFloat = 8
+
+        let belowY = anchorRect.minY - panelSize.height - gap
+        let aboveY = anchorRect.maxY + gap
+        let minY = visibleFrame.minY + gap
+        let maxY = max(minY, visibleFrame.maxY - panelSize.height - gap)
+        let y: CGFloat
+        if belowY >= minY {
+            y = belowY
+        } else if aboveY <= maxY {
+            y = aboveY
+        } else {
+            y = min(max(belowY, minY), maxY)
+        }
+
+        let minX = visibleFrame.minX + gap
+        let maxX = max(minX, visibleFrame.maxX - panelSize.width - gap)
+        let x = min(max(anchorRect.minX, minX), maxX)
+        return NSPoint(x: x, y: y)
+    }
+}
+
+@MainActor
+private final class CandidatePanelContentView: NSView {
+    private let stackView = NSStackView()
+    private let separatorView = NSView()
+    private let chevronField = NSTextField(labelWithString: "⌄")
+    private var presentation: CandidatePanelPresentation = .compact
+    private var candidateCount = 0
+    private var expandedColumnWidths: [CGFloat] = Array(repeating: 96, count: 4)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        setupStackView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        setupStackView()
+    }
+
+    var preferredPanelSize: NSSize {
+        switch presentation {
+        case .compact:
+            let width = stackView.arrangedSubviews.reduce(CGFloat(0)) { partial, view in
+                partial + view.intrinsicContentSize.width
+            } + CGFloat(max(stackView.arrangedSubviews.count - 1, 0)) * stackView.spacing + 48
+            return NSSize(width: max(width, 86), height: 44)
+        case .expanded:
+            let rows = max(Int(ceil(Double(candidateCount) / 4.0)), 1)
+            let width = expandedColumnWidths.reduce(CGFloat(0), +) + 16
+            return NSSize(width: max(width, 86), height: CGFloat(rows * 40 + 10))
+        }
+    }
+
+    func configure(
+        candidates: [String],
+        presentation: CandidatePanelPresentation,
+        highlightedRowIndex: Int
+    ) {
+        self.presentation = presentation
+        self.candidateCount = candidates.count
+        stackView.arrangedSubviews.forEach { view in
+            stackView.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        switch presentation {
+        case .compact:
+            configureCompact(candidates: candidates)
+        case .expanded:
+            configureExpanded(candidates: candidates, highlightedRowIndex: highlightedRowIndex)
+        }
+
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        switch presentation {
+        case .compact:
+            stackView.frame = NSRect(x: 6, y: 5, width: max(0, bounds.width - 48), height: bounds.height - 10)
+            separatorView.isHidden = false
+            chevronField.isHidden = false
+            separatorView.frame = NSRect(x: bounds.width - 35, y: 8, width: 1, height: bounds.height - 16)
+            chevronField.frame = NSRect(x: bounds.width - 30, y: 6, width: 24, height: bounds.height - 12)
+        case .expanded:
+            stackView.frame = NSRect(x: 8, y: 5, width: max(0, bounds.width - 16), height: bounds.height - 10)
+            separatorView.isHidden = true
+            chevronField.isHidden = true
+        }
+    }
+
+    private func setupStackView() {
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.distribution = .gravityAreas
+        stackView.spacing = 2
+        addSubview(stackView)
+
+        separatorView.wantsLayer = true
+        separatorView.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+        addSubview(separatorView)
+
+        chevronField.alignment = .center
+        chevronField.font = NSFont.systemFont(ofSize: 22, weight: .regular)
+        chevronField.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.78)
+        addSubview(chevronField)
+    }
+
+    private func configureCompact(candidates: [String]) {
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.distribution = .gravityAreas
+        stackView.spacing = 2
+
+        for (index, candidate) in candidates.enumerated() {
+            stackView.addArrangedSubview(
+                CandidateItemView(
+                    number: index + 1,
+                    candidate: candidate,
+                    isHighlighted: index == 0,
+                    presentation: .compact
+                )
+            )
+        }
+    }
+
+    private func configureExpanded(candidates: [String], highlightedRowIndex: Int) {
+        stackView.orientation = .vertical
+        stackView.alignment = .leading
+        stackView.distribution = .fillEqually
+        stackView.spacing = 0
+        expandedColumnWidths = Self.columnWidths(for: candidates)
+
+        let rows = stride(from: 0, to: candidates.count, by: 4).map { rowStart in
+            Array(candidates[rowStart..<min(rowStart + 4, candidates.count)])
+        }
+
+        for (rowIndex, rowCandidates) in rows.enumerated() {
+            let rowStack = NSStackView()
+            rowStack.orientation = .horizontal
+            rowStack.alignment = .centerY
+            rowStack.distribution = .gravityAreas
+            rowStack.spacing = 0
+            rowStack.widthAnchor.constraint(equalToConstant: expandedColumnWidths.reduce(CGFloat(0), +)).isActive = true
+
+            for columnIndex in 0..<4 {
+                if rowCandidates.indices.contains(columnIndex) {
+                    let itemView = CandidateItemView(
+                        number: columnIndex + 1,
+                        candidate: rowCandidates[columnIndex],
+                        isHighlighted: rowIndex == highlightedRowIndex && columnIndex == 0,
+                        presentation: .expanded
+                    )
+                    itemView.widthAnchor.constraint(equalToConstant: expandedColumnWidths[columnIndex]).isActive = true
+                    rowStack.addArrangedSubview(itemView)
+                } else {
+                    let spacer = NSView()
+                    spacer.widthAnchor.constraint(equalToConstant: expandedColumnWidths[columnIndex]).isActive = true
+                    rowStack.addArrangedSubview(spacer)
+                }
+            }
+            stackView.addArrangedSubview(rowStack)
+        }
+    }
+
+    private static func columnWidths(for candidates: [String]) -> [CGFloat] {
+        var widths = Array(repeating: CGFloat(74), count: 4)
+        for (index, candidate) in candidates.enumerated() {
+            let columnIndex = index % 4
+            let candidateWidth = ceil(
+                (candidate as NSString).size(
+                    withAttributes: [
+                        .font: NSFont.systemFont(ofSize: 21, weight: .medium)
+                    ]
+                ).width
+            )
+            widths[columnIndex] = max(widths[columnIndex], min(candidateWidth + 34, 180))
+        }
+        return widths
+    }
+}
+
+@MainActor
+private final class CandidateItemView: NSView {
+    private let number: Int
+    private let candidate: String
+    private let isHighlighted: Bool
+    private let presentation: CandidatePanelPresentation
+    private let numberField = NSTextField(labelWithString: "")
+    private let candidateField = NSTextField(labelWithString: "")
+
+    init(
+        number: Int,
+        candidate: String,
+        isHighlighted: Bool,
+        presentation: CandidatePanelPresentation
+    ) {
+        self.number = number
+        self.candidate = candidate
+        self.isHighlighted = isHighlighted
+        self.presentation = presentation
+        super.init(frame: .zero)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        self.number = 0
+        self.candidate = ""
+        self.isHighlighted = false
+        self.presentation = .compact
+        super.init(coder: coder)
+        setup()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let candidateWidth = ceil((candidate as NSString).size(withAttributes: [.font: candidateField.font as Any]).width)
+        switch presentation {
+        case .compact:
+            return NSSize(width: max(42, candidateWidth + 31), height: 34)
+        case .expanded:
+            return NSSize(width: 138, height: 38)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+    }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.cornerRadius = presentation == .compact ? 10 : 8
+        layer?.masksToBounds = true
+        layer?.backgroundColor = isHighlighted
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.clear.cgColor
+
+        numberField.stringValue = "\(number)"
+        numberField.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        numberField.textColor = isHighlighted
+            ? NSColor.white.withAlphaComponent(0.86)
+            : NSColor.secondaryLabelColor.withAlphaComponent(0.72)
+        numberField.alignment = .right
+        numberField.translatesAutoresizingMaskIntoConstraints = false
+
+        candidateField.stringValue = candidate
+        candidateField.font = NSFont.systemFont(
+            ofSize: presentation == .compact ? 22 : 21,
+            weight: .medium
+        )
+        candidateField.textColor = isHighlighted ? .white : .labelColor
+        candidateField.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(numberField)
+        addSubview(candidateField)
+        NSLayoutConstraint.activate([
+            numberField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            numberField.widthAnchor.constraint(equalToConstant: 11),
+            numberField.firstBaselineAnchor.constraint(equalTo: candidateField.firstBaselineAnchor, constant: -6),
+
+            candidateField.leadingAnchor.constraint(equalTo: numberField.trailingAnchor, constant: 3),
+            candidateField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
+            candidateField.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -0.5)
+        ])
     }
 }
 
