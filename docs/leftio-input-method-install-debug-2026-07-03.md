@@ -1,5 +1,9 @@
 # LeftIO macOS 输入法安装排查阶段记录
 
+> 这是历史排查记录，会保留当时已失败、已废弃的路径与命令，不是当前安装手册。
+> 请以 `docs/leftio-input-method-lifecycle.md` 为准；当前代码不写
+> `com.apple.HIToolbox`。
+
 记录时间：2026-07-03 18:04 +0800
 
 ## 目标

@@ -7,6 +7,11 @@ import OneHandAppKit
 
 @objc(LeftIOInputController)
 final class LeftIOInputController: IMKInputController {
+    private static let sessionBackendFactory = LeftIOSessionBackendFactory()
+    private static let inputLogLock = NSLock()
+    private static let inputEventLoggingEnabled =
+        ProcessInfo.processInfo.environment["LEFTIO_ENABLE_INPUT_EVENT_LOG"] == "1"
+        || UserDefaults.standard.bool(forKey: "LeftIOEnableInputEventLogging")
     private lazy var session = Self.makeSession()
     private lazy var oneHandController = OneHandInputController(
         session: session,
@@ -14,6 +19,9 @@ final class LeftIOInputController: IMKInputController {
     )
     private lazy var candidateWindowController = MainActor.assumeIsolated {
         CandidateWindowController()
+    }
+    private lazy var candidatePanelInteractionController = MainActor.assumeIsolated {
+        CandidatePanelInteractionController(inputController: self)
     }
     private let modeIndicatorController = ModeIndicatorController()
     private var hasMarkedText = false
@@ -50,15 +58,15 @@ final class LeftIOInputController: IMKInputController {
             return handleFlagsChanged(event, client: sender)
         }
 
+        if event.type == .keyDown {
+            pendingShiftToggle = false
+        }
+
         guard let oneHandEvent = OneHandMacKeyMapper.event(from: event) else {
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "pass event type=\(event.type.rawValue) keyCode=\(event.keyCode) chars=\(event.characters ?? "-") charsIgnoring=\(event.charactersIgnoringModifiers ?? "-") flags=\(event.modifierFlags.rawValue)"
             )
             return false
-        }
-
-        if oneHandEvent.phase == .down {
-            pendingShiftToggle = false
         }
 
         return handleMappedKeyEvent(
@@ -188,14 +196,14 @@ final class LeftIOInputController: IMKInputController {
 
         if isShiftDown {
             pendingShiftToggle = !hasReservedModifier
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "flagsChanged shiftDown keyCode=\(event.keyCode) pending=\(pendingShiftToggle) flags=\(event.modifierFlags.rawValue)"
             )
             return pendingShiftToggle
         }
 
         guard pendingShiftToggle else {
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "flagsChanged shiftUp ignored keyCode=\(event.keyCode) flags=\(event.modifierFlags.rawValue)"
             )
             return false
@@ -204,7 +212,7 @@ final class LeftIOInputController: IMKInputController {
         pendingShiftToggle = false
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastShiftToggleUptime > 0.12 else {
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "flagsChanged shiftUp debounced keyCode=\(event.keyCode) flags=\(event.modifierFlags.rawValue)"
             )
             return true
@@ -231,6 +239,10 @@ final class LeftIOInputController: IMKInputController {
         charactersIgnoringModifiers: String?,
         client sender: Any
     ) -> Bool {
+        if mappedEvent.phase == .down {
+            pendingShiftToggle = false
+        }
+
         if localAsciiMode {
             return handleLocalAsciiKeyEvent(
                 mappedEvent,
@@ -249,7 +261,7 @@ final class LeftIOInputController: IMKInputController {
             collapseCandidatePanel()
             hideCandidateWindow()
             perform(.deleteBackward, client: sender)
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "\(source) directClientDelete keyCode=\(keyCodeDescription(keyCode)) chars=\(characters ?? "-") charsIgnoring=\(charactersIgnoringModifiers ?? "-") hasMarkedText=false"
             )
             return true
@@ -271,7 +283,7 @@ final class LeftIOInputController: IMKInputController {
         let result = oneHandController.handle(mappedEvent)
         updateCandidatePanelPresentation(after: result.actions, event: mappedEvent)
         synchronizeClientState(client: sender)
-        Self.writeInputLog(
+        Self.writeInputEventLog(
             "\(source) keyCode=\(keyCodeDescription(keyCode)) chars=\(characters ?? "-") charsIgnoring=\(charactersIgnoringModifiers ?? "-") key=\(mappedEvent.key.rawValue) phase=\(mappedEvent.phase) mods=\(mappedEvent.modifiers.rawValue) localAscii=false sessionAscii=\(session.context.isAsciiMode) actions=\(result.actions) consumed=\(result.isConsumed)"
         )
         return result.isConsumed
@@ -284,20 +296,20 @@ final class LeftIOInputController: IMKInputController {
             && !session.context.isComposing
     }
 
-    fileprivate func handleEventTapRKeyDown() {
+    fileprivate func handleEventTapRKeyDown() -> Bool {
         guard let sender = client() else {
-            Self.writeInputLog("eventTapR no client")
-            return
+            Self.writeInputEventLog("eventTapR no client")
+            return false
         }
 
         if hasMarkedText || session.context.isComposing {
             let result = oneHandController.handle(.init(key: .r, phase: .down))
             updateCandidatePanelPresentation(after: result.actions, event: .init(key: .r, phase: .down))
             synchronizeClientState(client: sender)
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "eventTapR routed key=R hasMarkedText=\(hasMarkedText) sessionComposing=\(session.context.isComposing) actions=\(result.actions) consumed=\(result.isConsumed)"
             )
-            return
+            return result.isConsumed
         }
 
         _ = oneHandController.cancelTransientState()
@@ -305,7 +317,8 @@ final class LeftIOInputController: IMKInputController {
         collapseCandidatePanel()
         hideCandidateWindow()
         perform(.deleteBackward, client: sender)
-        Self.writeInputLog("eventTapR directClientDelete")
+        Self.writeInputEventLog("eventTapR directClientDelete")
+        return true
     }
 
     private func updateCandidatePanelPresentation(
@@ -345,7 +358,7 @@ final class LeftIOInputController: IMKInputController {
         if mappedEvent.key == .f || mappedEvent.key == .g {
             moveExpandedCandidateWindow(backward: mappedEvent.key == .f)
             updateCandidates()
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "\(source) candidatePanelNavigate keyCode=\(keyCodeDescription(keyCode)) chars=\(characters ?? "-") charsIgnoring=\(charactersIgnoringModifiers ?? "-") key=\(mappedEvent.key.rawValue) start=\(expandedCandidateStartIndex) activeRow=\(expandedActiveRowIndex)"
             )
             return true
@@ -366,7 +379,7 @@ final class LeftIOInputController: IMKInputController {
         session.commitExpandedCandidate(at: candidateIndex)
         collapseCandidatePanel()
         synchronizeClientState(client: sender)
-        Self.writeInputLog(
+        Self.writeInputEventLog(
             "\(source) candidatePanelSelectExpanded keyCode=\(keyCodeDescription(keyCode)) key=\(mappedEvent.key.rawValue) candidateIndex=\(candidateIndex)"
         )
         return true
@@ -480,15 +493,15 @@ final class LeftIOInputController: IMKInputController {
         keyCode: UInt16,
         characters: String?,
         charactersIgnoringModifiers: String?
-    ) {
+    ) -> Bool {
         guard let sender = client() else {
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "eventTap key=\(mappedEvent.key.rawValue) no client phase=\(mappedEvent.phase)"
             )
-            return
+            return false
         }
 
-        _ = handleMappedKeyEvent(
+        return handleMappedKeyEvent(
             mappedEvent,
             source: "eventTap",
             keyCode: keyCode,
@@ -531,7 +544,7 @@ final class LeftIOInputController: IMKInputController {
         }
 
         guard let action else {
-            Self.writeInputLog(
+            Self.writeInputEventLog(
                 "\(source) localAscii pass keyCode=\(keyCodeDescription(keyCode)) chars=\(characters ?? "-") key=\(mappedEvent.key.rawValue)"
             )
             return false
@@ -544,7 +557,7 @@ final class LeftIOInputController: IMKInputController {
         collapseCandidatePanel()
         hideCandidateWindow()
         perform(action, client: sender)
-        Self.writeInputLog(
+        Self.writeInputEventLog(
             "\(source) localAscii keyCode=\(keyCodeDescription(keyCode)) chars=\(characters ?? "-") charsIgnoring=\(charactersIgnoringModifiers ?? "-") key=\(mappedEvent.key.rawValue) mods=\(mappedEvent.modifiers.rawValue) action=\(action)"
         )
         return true
@@ -694,6 +707,7 @@ final class LeftIOInputController: IMKInputController {
         }
 
         let controller = candidateWindowController
+        let interactionController = candidatePanelInteractionController
         let inputClient = client()
         let imkServer = server()
         let presentation = candidatePanelPresentation
@@ -707,9 +721,56 @@ final class LeftIOInputController: IMKInputController {
                 expandedActiveRowIndex: expandedActiveRowIndex,
                 presentation: presentation,
                 server: imkServer,
-                client: inputClient
+                client: inputClient,
+                onSelectCandidate: { visibleIndex, effectivePresentation in
+                    interactionController.commitCandidate(
+                        visibleIndex: visibleIndex,
+                        presentation: effectivePresentation
+                    )
+                },
+                onExpand: {
+                    interactionController.expandCandidatePanel()
+                }
             )
         }
+    }
+
+    @MainActor
+    fileprivate func commitCandidateFromPanel(
+        visibleIndex: Int,
+        presentation: CandidatePanelPresentation
+    ) {
+        guard visibleIndex >= 0,
+              let sender = client() else {
+            return
+        }
+
+        switch presentation {
+        case .compact:
+            session.commitDisplayedCandidate(at: visibleIndex)
+        case .expanded:
+            session.commitExpandedCandidate(at: expandedCandidateStartIndex + visibleIndex)
+        }
+
+        collapseCandidatePanel()
+        synchronizeClientState(client: sender)
+    }
+
+    @MainActor
+    fileprivate func expandCandidatePanelFromMouse() {
+        let displayedCount = session.displayedCandidates.count
+        let available = session.expandedCandidateWindow(
+            startingAt: 0,
+            limit: max(displayedCount + 1, Self.expandedCandidateVisibleLimit)
+        )
+        guard available.count > displayedCount else {
+            return
+        }
+
+        candidatePanelPresentation = .expanded
+        expandedCandidateStartIndex = 0
+        expandedActiveRowIndex = 0
+        updateCandidates()
     }
 
     private func insertText(_ text: String, client sender: Any) {
@@ -745,20 +806,33 @@ final class LeftIOInputController: IMKInputController {
             _ = (sender as AnyObject).perform(selector)
             Self.writeInputLog("sendCommand selector=\(NSStringFromSelector(selector)) via=perform")
         } else if selector == #selector(NSResponder.deleteBackward(_:)) {
-            Self.postSyntheticDelete()
-            Self.writeInputLog("sendCommand selector=\(NSStringFromSelector(selector)) via=syntheticDelete")
+            let posted = Self.postSyntheticDelete()
+            Self.writeInputLog(
+                "sendCommand selector=\(NSStringFromSelector(selector)) via=syntheticDelete posted=\(posted)"
+            )
         } else {
             Self.writeInputLog("sendCommand selector=\(NSStringFromSelector(selector)) unsupportedClient=\(type(of: sender))")
         }
     }
 
-    fileprivate static func postSyntheticDelete() {
+    @discardableResult
+    fileprivate static func postSyntheticDelete() -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
         let keyCode = CGKeyCode(kVK_Delete)
-        CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)?
-            .post(tap: .cghidEventTap)
-        CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)?
-            .post(tap: .cghidEventTap)
+        guard let keyDown = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: keyCode,
+            keyDown: true
+        ), let keyUp = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: keyCode,
+            keyDown: false
+        ) else {
+            return false
+        }
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
     }
 
     private func hideCandidateWindow() {
@@ -783,7 +857,7 @@ final class LeftIOInputController: IMKInputController {
         }
     }
 
-    private static func loadLexicon() -> OneHandLexicon {
+    fileprivate static func loadLexicon() -> OneHandLexicon {
         let bundle = Bundle.main
         let candidates = [
             bundle.url(forResource: "onehand_t9", withExtension: "dict.yaml", subdirectory: "Rime"),
@@ -820,23 +894,16 @@ final class LeftIOInputController: IMKInputController {
     }
 
     private static func makeSession() -> AnyOneHandSession {
-        let lexicon = loadLexicon()
-        let fallbackSession = AnyOneHandSession(OneHandLexiconSession(lexicon: lexicon))
-        guard let layout = try? OneHandRimeDataProvider.prepareLayout() else {
-            return fallbackSession
-        }
+        sessionBackendFactory.makeSession()
+    }
 
-        guard let rimeSession = try? OneHandRimeSession(
-            sharedDataDirectory: layout.sharedDataDirectory,
-            userDataDirectory: layout.userDataDirectory
-        ) else {
-            return fallbackSession
-        }
-
-        return AnyOneHandSession(rimeSession)
+    static func prewarmSessionBackend() {
+        sessionBackendFactory.prewarm()
     }
 
     fileprivate static func writeInputLog(_ message: String) {
+        inputLogLock.lock()
+        defer { inputLogLock.unlock() }
         let fileManager = FileManager.default
         let directory = (fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))
@@ -860,12 +927,99 @@ final class LeftIOInputController: IMKInputController {
             NSLog("LeftIO input log write failed: %@", String(describing: error))
         }
     }
+
+    fileprivate static func writeInputEventLog(_ message: String) {
+        guard inputEventLoggingEnabled else {
+            return
+        }
+        writeInputLog(message)
+    }
 }
+
+private final class LeftIOSessionBackendFactory: @unchecked Sendable {
+    private enum Backend: Sendable {
+        case rime(OneHandRimeDataProvider.Layout)
+        case lexicon(OneHandLexicon)
+    }
+
+    private let queue = DispatchQueue(label: "io.github.cstcat.leftio.session-prewarm", qos: .userInitiated)
+    private var backend: Backend?
+
+    func prewarm() {
+        queue.async { [self] in
+            guard backend == nil else {
+                return
+            }
+            backend = prepareBackend()
+        }
+    }
+
+    func makeSession() -> AnyOneHandSession {
+        let preparedBackend = queue.sync { [self] in
+            let preparedBackend = backend ?? prepareBackend()
+            backend = preparedBackend
+            return preparedBackend
+        }
+
+        // Construct the long-lived session on the IMK caller thread. The
+        // serial queue only protects/prepares the reusable backend state.
+        switch preparedBackend {
+        case let .rime(layout):
+            do {
+                let session = try OneHandRimeSession(
+                    sharedDataDirectory: layout.sharedDataDirectory,
+                    userDataDirectory: layout.userDataDirectory
+                )
+                LeftIOInputController.writeInputLog("session backend=librime")
+                return AnyOneHandSession(session)
+            } catch {
+                return makeFallbackSession(after: error)
+            }
+        case let .lexicon(lexicon):
+            LeftIOInputController.writeInputLog("session backend=indexed-lexicon")
+            return AnyOneHandSession(OneHandLexiconSession(lexicon: lexicon))
+        }
+    }
+
+    private func prepareBackend() -> Backend {
+        do {
+            let layout = try OneHandRimeDataProvider.prepareLayout()
+            _ = try OneHandRimeSession(
+                sharedDataDirectory: layout.sharedDataDirectory,
+                userDataDirectory: layout.userDataDirectory
+            )
+            LeftIOInputController.writeInputLog("session prewarm backend=librime complete")
+            return .rime(layout)
+        } catch {
+            let lexicon = LeftIOInputController.loadLexicon()
+            LeftIOInputController.writeInputLog(
+                "session prewarm librime unavailable error=\(error.localizedDescription); indexed lexicon ready"
+            )
+            return .lexicon(lexicon)
+        }
+    }
+
+    private func makeFallbackSession(after error: Error) -> AnyOneHandSession {
+        let lexicon = LeftIOInputController.loadLexicon()
+        queue.sync { [self] in
+            backend = .lexicon(lexicon)
+        }
+        LeftIOInputController.writeInputLog(
+            "session librime unavailable error=\(error.localizedDescription); using indexed lexicon fallback"
+        )
+        return AnyOneHandSession(OneHandLexiconSession(lexicon: lexicon))
+    }
+}
+
+// InputMethodKit delivers controller callbacks on the input method's main run
+// loop. The event tap also refuses to route off-main before touching a
+// controller, so transferring the weak UI interaction reference is safe.
+extension LeftIOInputController: @unchecked Sendable {}
 
 final class RKeyEventTap {
     private static let inputSourceID = "io.github.cstcat.inputmethod.leftio.onehandt9"
     private static let bundleInputSourceID = "io.github.cstcat.inputmethod.leftio"
-    nonisolated(unsafe) private static var activeController: LeftIOInputController?
+    nonisolated(unsafe) private static weak var activeController: LeftIOInputController?
     nonisolated(unsafe) private static var eventTap: CFMachPort?
     nonisolated(unsafe) private static var runLoopSource: CFRunLoopSource?
 
@@ -920,7 +1074,8 @@ final class RKeyEventTap {
             return
         }
 
-        LeftIOInputController.writeInputLog("eventTapR controllerRetainedAfterDeactivate")
+        activeController = nil
+        LeftIOInputController.writeInputLog("eventTapR controllerClearedAfterDeactivate")
     }
 
     static func close(controller: LeftIOInputController) {
@@ -976,27 +1131,51 @@ final class RKeyEventTap {
             return Unmanaged.passUnretained(event)
         }
 
+        guard Thread.isMainThread else {
+            return Unmanaged.passUnretained(event)
+        }
+
         if let controller = activeController {
-            DispatchQueue.main.async {
-                LeftIOInputController.writeInputLog(
-                    "eventTap routeToController key=\(mappedEvent.key.rawValue) phase=\(mappedEvent.phase)"
+            LeftIOInputController.writeInputEventLog(
+                "eventTap routeToController key=\(mappedEvent.key.rawValue) phase=\(mappedEvent.phase)"
+            )
+            let consumed: Bool
+            if mappedEvent.key == .r, mappedEvent.phase == .down {
+                consumed = controller.handleEventTapRKeyDown()
+            } else {
+                consumed = controller.handleEventTapKey(
+                    mappedEvent,
+                    keyCode: keyCode,
+                    characters: characters,
+                    charactersIgnoringModifiers: charactersIgnoringModifiers
                 )
-                if mappedEvent.key == .r, mappedEvent.phase == .down {
-                    controller.handleEventTapRKeyDown()
-                } else {
-                    controller.handleEventTapKey(
-                        mappedEvent,
-                        keyCode: keyCode,
-                        characters: characters,
-                        charactersIgnoringModifiers: charactersIgnoringModifiers
-                    )
-                }
             }
-            return nil
+            if consumed {
+                return nil
+            }
+            if mappedEvent.key == .r, mappedEvent.phase == .down {
+                let posted = LeftIOInputController.postSyntheticDelete()
+                LeftIOInputController.writeInputEventLog(
+                    "eventTapR fallbackSyntheticDelete noClient posted=\(posted)"
+                )
+                return posted ? nil : Unmanaged.passUnretained(event)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        if mappedEvent.key == .r {
+            if mappedEvent.phase == .down {
+                let posted = LeftIOInputController.postSyntheticDelete()
+                LeftIOInputController.writeInputEventLog(
+                    "eventTapR fallbackSyntheticDelete noController posted=\(posted)"
+                )
+                return posted ? nil : Unmanaged.passUnretained(event)
+            }
+            return Unmanaged.passUnretained(event)
         }
 
         DispatchQueue.main.async {
-            LeftIOInputController.writeInputLog(
+            LeftIOInputController.writeInputEventLog(
                 "eventTap passThrough activeController=false keyCode=\(keyCode)"
             )
         }
@@ -1082,10 +1261,6 @@ final class RKeyEventTap {
         }
     }
 
-    private static func postSyntheticDelete() {
-        LeftIOInputController.postSyntheticDelete()
-    }
-
     private static func currentInputSourceIsLeftIO() -> Bool {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
             return false
@@ -1113,6 +1288,29 @@ final class RKeyEventTap {
 }
 
 @MainActor
+private final class CandidatePanelInteractionController {
+    private weak var inputController: LeftIOInputController?
+
+    init(inputController: LeftIOInputController) {
+        self.inputController = inputController
+    }
+
+    func commitCandidate(
+        visibleIndex: Int,
+        presentation: CandidatePanelPresentation
+    ) {
+        inputController?.commitCandidateFromPanel(
+            visibleIndex: visibleIndex,
+            presentation: presentation
+        )
+    }
+
+    func expandCandidatePanel() {
+        inputController?.expandCandidatePanelFromMouse()
+    }
+}
+
+@MainActor
 private enum CandidatePanelPresentation {
     case compact
     case expanded
@@ -1130,7 +1328,9 @@ private final class CandidateWindowController {
         expandedActiveRowIndex: Int,
         presentation: CandidatePanelPresentation,
         server: IMKServer?,
-        client: (any IMKTextInput)?
+        client: (any IMKTextInput)?,
+        onSelectCandidate: @escaping (Int, CandidatePanelPresentation) -> Void,
+        onExpand: @escaping () -> Void
     ) {
         let visibleCandidates: [String]
         let effectivePresentation: CandidatePanelPresentation
@@ -1154,7 +1354,11 @@ private final class CandidateWindowController {
         contentView.configure(
             candidates: visibleCandidates,
             presentation: effectivePresentation,
-            highlightedRowIndex: expandedActiveRowIndex
+            highlightedRowIndex: expandedActiveRowIndex,
+            onSelectCandidate: { index in
+                onSelectCandidate(index, effectivePresentation)
+            },
+            onExpand: onExpand
         )
         let size = contentView.preferredPanelSize
         let frame = NSRect(origin: origin(for: size, client: client), size: size)
@@ -1250,6 +1454,8 @@ private final class CandidatePanelContentView: NSView {
     private var presentation: CandidatePanelPresentation = .compact
     private var candidateCount = 0
     private var expandedColumnWidths: [CGFloat] = Array(repeating: 96, count: 4)
+    private var onSelectCandidate: ((Int) -> Void)?
+    private var onExpand: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1261,6 +1467,30 @@ private final class CandidatePanelContentView: NSView {
         super.init(coder: coder)
         wantsLayer = true
         setupStackView()
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if presentation == .compact,
+           !chevronField.isHidden,
+           chevronField.frame.contains(point) {
+            return self
+        }
+        return super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if presentation == .compact,
+           !chevronField.isHidden,
+           chevronField.frame.contains(point) {
+            onExpand?()
+            return
+        }
+        super.mouseDown(with: event)
     }
 
     var preferredPanelSize: NSSize {
@@ -1280,10 +1510,14 @@ private final class CandidatePanelContentView: NSView {
     func configure(
         candidates: [String],
         presentation: CandidatePanelPresentation,
-        highlightedRowIndex: Int
+        highlightedRowIndex: Int,
+        onSelectCandidate: @escaping (Int) -> Void,
+        onExpand: @escaping () -> Void
     ) {
         self.presentation = presentation
         self.candidateCount = candidates.count
+        self.onSelectCandidate = onSelectCandidate
+        self.onExpand = onExpand
         stackView.arrangedSubviews.forEach { view in
             stackView.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -1329,6 +1563,7 @@ private final class CandidatePanelContentView: NSView {
         chevronField.alignment = .center
         chevronField.font = NSFont.systemFont(ofSize: 22, weight: .regular)
         chevronField.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.78)
+        chevronField.toolTip = "展开候选"
         addSubview(chevronField)
     }
 
@@ -1344,7 +1579,10 @@ private final class CandidatePanelContentView: NSView {
                     number: index + 1,
                     candidate: candidate,
                     isHighlighted: index == 0,
-                    presentation: .compact
+                    presentation: .compact,
+                    onSelect: { [weak self] in
+                        self?.onSelectCandidate?(index)
+                    }
                 )
             )
         }
@@ -1375,7 +1613,10 @@ private final class CandidatePanelContentView: NSView {
                         number: columnIndex + 1,
                         candidate: rowCandidates[columnIndex],
                         isHighlighted: rowIndex == highlightedRowIndex && columnIndex == 0,
-                        presentation: .expanded
+                        presentation: .expanded,
+                        onSelect: { [weak self] in
+                            self?.onSelectCandidate?(rowIndex * 4 + columnIndex)
+                        }
                     )
                     itemView.widthAnchor.constraint(equalToConstant: expandedColumnWidths[columnIndex]).isActive = true
                     rowStack.addArrangedSubview(itemView)
@@ -1412,6 +1653,7 @@ private final class CandidateItemView: NSView {
     private let candidate: String
     private let isHighlighted: Bool
     private let presentation: CandidatePanelPresentation
+    private let onSelect: (() -> Void)?
     private let numberField = NSTextField(labelWithString: "")
     private let candidateField = NSTextField(labelWithString: "")
 
@@ -1419,12 +1661,14 @@ private final class CandidateItemView: NSView {
         number: Int,
         candidate: String,
         isHighlighted: Bool,
-        presentation: CandidatePanelPresentation
+        presentation: CandidatePanelPresentation,
+        onSelect: (() -> Void)? = nil
     ) {
         self.number = number
         self.candidate = candidate
         self.isHighlighted = isHighlighted
         self.presentation = presentation
+        self.onSelect = onSelect
         super.init(frame: .zero)
         setup()
     }
@@ -1434,6 +1678,7 @@ private final class CandidateItemView: NSView {
         self.candidate = ""
         self.isHighlighted = false
         self.presentation = .compact
+        self.onSelect = nil
         super.init(coder: coder)
         setup()
     }
@@ -1448,8 +1693,17 @@ private final class CandidateItemView: NSView {
         }
     }
 
-    override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    @objc
+    private func selectCandidate(_ recognizer: NSClickGestureRecognizer) {
+        onSelect?()
     }
 
     private func setup() {
@@ -1459,6 +1713,10 @@ private final class CandidateItemView: NSView {
         layer?.backgroundColor = isHighlighted
             ? NSColor.controlAccentColor.cgColor
             : NSColor.clear.cgColor
+        toolTip = candidate
+        addGestureRecognizer(
+            NSClickGestureRecognizer(target: self, action: #selector(selectCandidate(_:)))
+        )
 
         numberField.stringValue = "\(number)"
         numberField.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)

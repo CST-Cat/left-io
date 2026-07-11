@@ -54,10 +54,20 @@ public struct OneHandStateMachine: Equatable, Sendable {
             }
 
             var actions: [OneHandAction] = []
+            var routedContext = context
             if let standaloneSpace = spaceChord.end(context: context) {
                 actions.append(standaloneSpace)
+                if standaloneSpace == .commitFirstCandidate {
+                    // Actions are applied in order by OneHandInputController.
+                    // A standalone Space commits (or clears a literal)
+                    // composition before the following physical key is
+                    // routed, so that key must not see the stale candidate
+                    // context from before the commit.
+                    routedContext.isComposing = false
+                    routedContext.hasCandidates = false
+                }
             }
-            actions.append(contentsOf: routeNonSpaceKeyDown(event, context: context))
+            actions.append(contentsOf: routeNonSpaceKeyDown(event, context: routedContext))
             return actions
         }
 
@@ -79,6 +89,10 @@ public struct OneHandStateMachine: Equatable, Sendable {
     private mutating func routeNonSpaceKeyDown(_ event: OneHandKeyEvent, context: OneHandContext) -> [OneHandAction] {
         let key = event.key
 
+        if key == .q {
+            return handleQ(context: context)
+        }
+
         if let symbolActions = symbolLayer.action(for: key) {
             return symbolActions
         }
@@ -89,14 +103,6 @@ public struct OneHandStateMachine: Equatable, Sendable {
                 actions.append(.cancelComposition)
             }
             return actions
-        }
-
-        if key == .q {
-            if context.isComposing {
-                return [.insertSyllableDelimiter]
-            }
-
-            return [symbolLayer.enter()]
         }
 
         if let code = key.t9Code {
@@ -124,6 +130,20 @@ public struct OneHandStateMachine: Equatable, Sendable {
             return [.commitComposition]
         default:
             return []
+        }
+    }
+
+    private mutating func handleQ(context: OneHandContext) -> [OneHandAction] {
+        switch OneHandQFunctionKeyType.resolve(
+            isSymbolLayerActive: symbolLayer.isActive,
+            context: context
+        ) {
+        case .enterSymbolLayer:
+            return [symbolLayer.enter()]
+        case .exitSymbolLayer:
+            return [symbolLayer.exit()]
+        case .insertSyllableDelimiter:
+            return [.insertSyllableDelimiter]
         }
     }
 

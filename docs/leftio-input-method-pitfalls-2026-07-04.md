@@ -1,5 +1,8 @@
 # LeftIO macOS 输入法踩坑复盘
 
+> 这是按时间记录的调试复盘，早期章节可能包含已废弃的路径或实验命令。
+> 当前操作流程以 `docs/leftio-input-method-lifecycle.md` 为准。
+
 记录范围：从安装生命周期被理顺为“用户级安装 + TIS 注册 + 手动添加 + relogin”开始，一直到 `R` 键删除问题被追到 IMK 分发不稳定、并临时加上只拦 `R` 的事件 tap 为止。
 
 这份文档不是设计宣传稿，而是给后续维护用的事故记录：哪些路走错了、为什么错、证据是什么、以后应该怎么判断。
@@ -333,12 +336,24 @@ eventTapR create failed
 
 以后排查输入问题，先看日志而不是猜。
 
+逐键日志可能包含输入内容，当前版本默认关闭。只有在明确的短期调试窗口内才启用，并在重启 LeftIO 后复现：
+
+```sh
+defaults write io.github.cstcat.inputmethod.leftio LeftIOEnableInputEventLogging -bool true
+```
+
+调试完成后立即关闭并重新启动 LeftIO：
+
+```sh
+defaults delete io.github.cstcat.inputmethod.leftio LeftIOEnableInputEventLogging
+```
+
 日志路径：
 
 ```text
 ~/Library/Application Support/LeftIO/LeftIO.input.log
-~/Library/Input Methods/LeftIO.server.log
-~/Library/Input Methods/LeftIO.lifecycle.log
+~/Library/Application Support/LeftIO/LeftIO.server.log
+~/Library/Application Support/LeftIO/LeftIO.launch.log
 ```
 
 常见判断：
@@ -1024,7 +1039,7 @@ io.github.cstcat.inputmethod.leftio | - | LeftIO | enabled=1 | selectCapable=0
 验证口径：
 
 ```sh
-LEFTIO_SKIP_LIBRIME_BOOTSTRAP=1 scripts/build_input_method_app.sh
+LEFTIO_ALLOW_LEXICON_ONLY=1 scripts/build_input_method_app.sh
 scripts/install_input_method_app.sh
 make verify-input-method
 ```

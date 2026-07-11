@@ -4,7 +4,7 @@
 
 LeftIO is a macOS one-hand T9-style Chinese input method experiment.
 
-The current repository contains a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an InputMethodKit host, and both a real librime-backed session bridge and a lightweight lexicon fallback session. The host prefers librime when it can be loaded at runtime and falls back to the bundled dictionary-backed session otherwise. On macOS 26, the distributable is a single `LeftIO.app` container with an embedded input-method extension, and the DMG exposes that app together with an `Applications` shortcut for direct drag-and-drop installation.
+The current repository contains a testable Swift input controller core, a physical-key adapter for macOS keyboard events, an InputMethodKit host, and both a real librime-backed session bridge and a lightweight lexicon fallback session. The host prefers librime when it can be loaded at runtime and falls back to the bundled dictionary-backed session otherwise. The distributable is a direct InputMethodKit `LeftIO.app` bundle, not an embedded `.appex`; opening it from the DMG runs the self-install flow that copies the app to `~/Library/Input Methods` and registers it with TIS.
 
 ## License
 
@@ -24,12 +24,12 @@ Z PQRS     X TUV      C WXYZ
 
 ## Implemented Core Behavior
 
-`Q` is context-sensitive:
+`Q` is a context-sensitive function key with three explicit types:
 
 ```text
-empty composition       Q -> enter symbol layer
-composing pinyin        Q -> insert syllable delimiter
-inside symbol layer     Q -> exit symbol layer
+enter symbol layer          idle composition       Q -> enter symbol layer
+insert syllable delimiter   composing pinyin       Q -> insert syllable delimiter
+exit symbol layer           inside symbol layer     Q -> exit symbol layer
 ```
 
 `Space` is handled as a chord, not as a long press:
@@ -72,6 +72,7 @@ Sources/OneHand/
 ├── OneHandKey.swift
 ├── OneHandLexicon.swift
 ├── OneHandLexiconSession.swift
+├── OneHandQFunctionKeyType.swift
 ├── OneHandRecordingSession.swift
 ├── OneHandRimeBridge.swift
 ├── OneHandRimeDataProvider.swift
@@ -92,21 +93,44 @@ Sources/CRimeBridge/
 ├── CRimeBridge.c
 └── include/CRimeBridge.h
 
+Sources/LeftIOInputMethod/
+├── LeftIOInputController.swift
+└── LeftIOInputMethodApp.swift
+
+Sources/LeftIOLauncher/
+└── LeftIOLauncher.swift
+
 data/
+├── prebuild/default.custom.yaml
+├── onehand_t9_phrases.tsv
 ├── onehand_t9.schema.yaml
 ├── onehand_t9.dict.yaml
 ├── onehand_t9.custom.yaml
 └── onehand_symbols.yaml
 
 scripts/
+├── build_dmg.sh
+├── build_input_method_app.sh
+├── build_release_dmg.sh
 ├── build_vendored_librime.sh
 ├── generate_onehand_t9_dict.py
-└── sample_pinyin.tsv
+├── install_input_method_app.sh
+├── install_input_method_app_system.sh
+├── repair_input_method_sources.sh
+├── sample_pinyin.tsv
+├── test_install_transactions.sh
+├── test_prebuilt_rime_startup.sh
+├── test_rime_abi_guard.sh
+├── uninstall_input_method_app.sh
+├── verify_distribution.sh
+└── verify_input_method_install.sh
 
 Tests/OneHandTests/
-├── OneHandInputControllerTests.swift
 ├── OneHandConfigurationLoaderTests.swift
+├── OneHandDictionaryGeneratorTests.swift
+├── OneHandInputControllerTests.swift
 ├── OneHandLexiconSessionTests.swift
+├── OneHandRimeDataProviderTests.swift
 ├── OneHandRimeIntegrationTests.swift
 ├── OneHandRimeSessionTests.swift
 ├── OneHandStateMachineTests.swift
@@ -117,6 +141,8 @@ Tests/OneHandTests/
 Tests/OneHandKeyboardTests/
 └── OneHandPhysicalKeyMapperTests.swift
 ```
+
+`OneHandRimeSession` lives in `Sources/OneHand/OneHandRimeBridge.swift`. The app `Info.plist` and icons are generated into `.build/input-method/LeftIO.app` by `scripts/build_input_method_app.sh`; they are not checked in under `Sources/`.
 
 ## Open In Xcode
 
@@ -136,11 +162,11 @@ make xcodebuild-test
 
 `make test` runs XCTest only and disables Swift Testing discovery. The package currently uses XCTest, and this avoids a SwiftPM testing-helper code-signing issue on this macOS/Xcode setup.
 
-`make build-vendored-librime` clones and builds a local `vendor/librime` checkout when you want the real Rime backend instead of the lexicon fallback.
+`make build-vendored-librime` checks out the exact librime 1.17.0 source commit recorded by the build script, initializes its pinned submodules, verifies Boost's SHA-256, and builds `arm64` plus `x86_64`. It refuses tracked modifications in the checkout. CMake must already be installed; the build does not run an unpinned `pip install`.
 
-`make build-input-method` bootstraps `vendor/librime` automatically on local builds when the vendored dylib or minimal Rime data is missing. Set `LEFTIO_SKIP_LIBRIME_BOOTSTRAP=1` if you explicitly want a fallback-only build.
+`make build-input-method` requires that pinned engine by default. Set `LEFTIO_AUTO_BOOTSTRAP_LIBRIME=1` to explicitly allow the build to fetch it, or `LEFTIO_ALLOW_LEXICON_ONLY=1` for a deliberate fallback-only development build. The normal app and DMG contain universal binaries and target macOS 13 or newer.
 
-The GitHub Actions workflow runs both commands above and a dictionary-generator smoke test on macOS.
+The GitHub Actions workflow builds the real pinned engine, treats Swift warnings as errors, runs both SwiftPM and Xcode tests, reproduces the production dictionary, then builds, mounts, and inspects the universal DMG.
 
 ## Local Installation
 
@@ -150,11 +176,25 @@ Build the experimental InputMethodKit host:
 make build-input-method
 ```
 
-Build a distributable installer image:
+Build a development installer image:
 
 ```sh
 make build-dmg
 ```
+
+The DMG is not an `/Applications` drag installer. Open `LeftIO.app` or `Install LeftIO.command` from the image; the app stages and signature-checks a clean copy in `~/Library/Input Methods`, atomically activates it, verifies TIS registration/enablement, and rolls back the previous bundle if registration fails.
+
+For a public release, provide a Developer ID Application identity and a stored `notarytool` keychain profile:
+
+```sh
+LEFTIO_VERSION="0.1.0" \
+LEFTIO_BUILD_NUMBER="1" \
+LEFTIO_SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" \
+LEFTIO_NOTARY_PROFILE="leftio-notary" \
+make build-release-dmg
+```
+
+This path requires explicit three-component `LEFTIO_VERSION` and monotonically increasing `LEFTIO_BUILD_NUMBER` values plus universal binaries. It discards incremental dependency outputs and re-extracts Boost from the SHA-256-verified archive, signs the nested engine and app with hardened runtime, signs and notarizes the DMG, rejects an accepted submission if its notary log still contains issues, staples the ticket, mounts the result, checks bundled license notices, and runs Gatekeeper assessment. Development builds remain locally signed and are not represented as notarized releases.
 
 For development, install the input method for the current user. This copies the app to `~/Library/Input Methods/LeftIO.app`, asks TIS to register and enable it, and leaves the current input source unchanged.
 
@@ -194,11 +234,11 @@ To also remove a system-level copy, run:
 LEFTIO_UNINSTALL_SYSTEM=1 make uninstall-input-method
 ```
 
-The install and uninstall scripts use TIS registration APIs and do not write `com.apple.HIToolbox` or switch the current input source. The installed input-method app is a direct InputMethodKit app bundle, not an embedded `.appex`.
+The install and uninstall scripts use TIS registration APIs and do not write `com.apple.HIToolbox` or switch the current input source. A user-only uninstall does not disable the TIS source while a system copy remains. Lifecycle logs live under `~/Library/Application Support/LeftIO`; no shared writable log path is used. Per-key event logging is disabled by default because it can contain typed characters. For an explicit debugging session, enable `LeftIOEnableInputEventLogging` in the app defaults (or launch with `LEFTIO_ENABLE_INPUT_EVENT_LOG=1`) and disable it again afterward. The installed input-method app is a direct InputMethodKit app bundle generated by `scripts/build_input_method_app.sh`; no embedded `.appex` is produced.
 
 See [docs/leftio-input-method-lifecycle.md](docs/leftio-input-method-lifecycle.md) for the full install, registration, verification, and uninstall lifecycle.
 
-The current host is a functional IMK shell wired to the one-hand key state machine. It reads `data/onehand_symbols.yaml`, prefers a real librime session when `librime` can be loaded at runtime, and falls back to the bundled `data/onehand_t9.dict.yaml` lexicon session when librime is unavailable. Both backends show candidates in the system candidate window, support paging with `F/G`, and commit candidates with `Space` or `1-4`.
+The current host is a functional IMK shell wired to the one-hand key state machine. It reads `data/onehand_symbols.yaml`, prefers a real librime session when `librime` can be loaded at runtime, and falls back to the bundled `data/onehand_t9.dict.yaml` lexicon session when librime is unavailable. The build precompiles a complete production workspace into `Contents/Resources/Rime/build`; the first session resolves compiled resources directly from that immutable workspace, so a legacy or partially-written `user-data/build` cannot override it. Rime's user dictionary remains in the user data directory. The host also prewarms Rime (or the indexed fallback) off the first-key path. Both backends drive LeftIO's candidate panel, support paging with `F/G`, accept mouse selection and expansion, and commit candidates with `Space` or `1-4`.
 
 ## macOS Key Mapping
 
@@ -228,7 +268,7 @@ if let event = OneHandMacKeyMapper.event(from: nsEvent) {
 }
 ```
 
-The future Squirrel/InputMethodKit adapter should use `isConsumed`, not action count, to decide whether to swallow the original key event. `Space` key-down deliberately returns an empty action list because the controller is waiting to determine whether the user is starting a chord or pressing Space alone, but that key event is still consumed.
+The InputMethodKit adapter uses `isConsumed`, not action count, to decide whether to swallow the original key event. `Space` key-down deliberately returns an empty action list because the controller is waiting to determine whether the user is starting a chord or pressing Space alone, but that key event is still consumed. Idle `Esc` and other pass-through events remain available to the client even when the process-wide R-key event tap is active.
 
 `OneHandSession` is the host boundary:
 
@@ -237,10 +277,15 @@ public protocol OneHandSession {
     var context: OneHandContext { get }
     var compositionText: String { get }
     var displayedCandidates: [String] { get }
+    var expandedCandidates: [String] { get }
+    func expandedCandidateWindow(startingAt startIndex: Int, limit: Int) -> [String]
     func apply(_ action: OneHandAction)
     func takeClientActions() -> [OneHandClientAction]
     func commitCurrentComposition()
+    func commitDisplayedCandidate(at index: Int)
     func commitDisplayedCandidate(matching text: String)
+    func commitExpandedCandidate(at index: Int)
+    func setAsciiMode(_ enabled: Bool)
     func reset()
 }
 ```
@@ -250,9 +295,10 @@ Current session implementations:
 ```text
 OneHandRimeSession
 -> dynamically loads librime at runtime
--> prepares and deploys the requested schema before opening a session
+-> bounds-checks every required C API member before use
+-> deploys each schema once per process/data layout and reuses the runtime
 -> drives schema selection, candidate lookup, paging, and commit through Rime C API
--> falls back cleanly when librime is unavailable
+-> reports initialization failure so the host can select the indexed fallback
 
 OneHandLexiconSession
 -> loads entries from a Rime-style dictionary file
@@ -307,7 +353,10 @@ python3 scripts/generate_onehand_t9_dict.py scripts/sample_pinyin.tsv > data/one
 For the bundled Rime data, generate the production table from `luna_pinyin`:
 
 ```sh
-python3 scripts/generate_onehand_t9_dict.py vendor/librime/data/minimal/luna_pinyin.dict.yaml > data/onehand_t9.dict.yaml
+python3 scripts/generate_onehand_t9_dict.py \
+  vendor/librime/data/minimal/luna_pinyin.dict.yaml \
+  --supplement data/onehand_t9_phrases.tsv \
+  > data/onehand_t9.dict.yaml
 ```
 
 The production table is derived from upstream Rime `luna_pinyin` and `essay`
@@ -315,8 +364,11 @@ data and is distributed under LGPL-3.0-only. Keep the generated header comments
 intact when redistributing `data/onehand_t9.dict.yaml`.
 
 When `essay.txt` exists next to the input dictionary, the generator uses its real
-Rime frequencies for weights and derives phrase rows from single-character Rime
-readings. Pass `--no-essay-phrases` to keep only dictionary rows.
+Rime frequencies for weights. It derives an essay-only phrase only when every
+character has one unambiguous T9 code. Phrase pronunciations involving
+polyphonic characters must come from an explicit source-dictionary row or
+`--supplement`; the generator never invents them from a character's most common
+reading. Pass `--no-essay-phrases` to keep only explicit dictionary rows.
 
 The generated table dictionary includes explicit `text/code/weight` columns so it can be consumed by `table_translator`.
 

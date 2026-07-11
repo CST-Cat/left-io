@@ -23,11 +23,7 @@ public struct SymbolLayerController: Equatable, Sendable {
             return nil
         }
 
-        if key == .q {
-            return [exit()]
-        }
-
-        guard let entry = configuration.symbols[key] else {
+        guard key.isSymbolLayerSlot, let entry = configuration.symbols[key] else {
             return nil
         }
 

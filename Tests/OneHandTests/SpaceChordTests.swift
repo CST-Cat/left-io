@@ -37,6 +37,19 @@ final class SpaceChordTests: XCTestCase {
         XCTAssertEqual(machine.handle(.init(key: .space, phase: .up), context: .init(hasCandidates: true)), [])
     }
 
+    func testRepeatedSpaceDownDoesNotResetUsedChord() {
+        var machine = OneHandStateMachine()
+
+        _ = machine.handle(.init(key: .space, phase: .down), context: .init())
+        XCTAssertEqual(machine.handle(.init(key: .w, phase: .down), context: .init()), [.inputDigit(2)])
+
+        // Holding Space can emit repeated key-down events. They must not turn an
+        // already-used chord back into a standalone Space press.
+        _ = machine.handle(.init(key: .space, phase: .down), context: .init())
+
+        XCTAssertEqual(machine.handle(.init(key: .space, phase: .up), context: .init()), [])
+    }
+
     func testSpaceWithVInsertsNewline() {
         var machine = OneHandStateMachine()
 
@@ -55,6 +68,23 @@ final class SpaceChordTests: XCTestCase {
             .commitFirstCandidate,
             .deleteBackward
         ])
+    }
+
+    func testNonChordPageKeyUsesPostCommitContext() {
+        var machine = OneHandStateMachine()
+
+        _ = machine.handle(
+            .init(key: .space, phase: .down),
+            context: .init(isComposing: true, hasCandidates: true)
+        )
+
+        XCTAssertEqual(
+            machine.handle(
+                .init(key: .f, phase: .down),
+                context: .init(isComposing: true, hasCandidates: true)
+            ),
+            [.commitFirstCandidate, .insertText("-")]
+        )
     }
 
     func testCancelPendingSpaceOnlyClearsSpaceChord() {

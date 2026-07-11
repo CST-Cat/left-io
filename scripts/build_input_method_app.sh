@@ -14,8 +14,11 @@ BUILD_DIR="$ROOT_DIR/.build/input-method"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 FRAMEWORKS_DIR="$APP_DIR/Contents/Frameworks"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
-MIN_SYSTEM_VERSION="15.0"
+MIN_SYSTEM_VERSION="13.0"
 RIME_MINIMAL_DIR="${LEFTIO_RIME_MINIMAL_DIR:-$VENDORED_RIME_ROOT/data/minimal}"
+VERSION="${LEFTIO_VERSION:-0.1.0}"
+BUILD_NUMBER="${LEFTIO_BUILD_NUMBER:-$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)}"
+ARCHS="${LEFTIO_ARCHS:-arm64 x86_64}"
 
 preferred_input_method_sdkroot() {
   local sdk_dir
@@ -46,19 +49,22 @@ detect_vendored_librime() {
   return 1
 }
 
-should_auto_bootstrap_librime() {
-  if [[ "${LEFTIO_SKIP_LIBRIME_BOOTSTRAP:-0}" == "1" ]]; then
-    return 1
-  fi
-
-  if [[ -n "${LEFTIO_AUTO_BOOTSTRAP_LIBRIME:-}" ]]; then
-    if [[ "${LEFTIO_AUTO_BOOTSTRAP_LIBRIME}" == "1" ]]; then
+detect_rime_deployer() {
+  local candidate
+  for candidate in \
+    "$VENDORED_RIME_ROOT/build/bin/rime_deployer" \
+    "$VENDORED_RIME_ROOT/build/bin/Release/rime_deployer" \
+    "$VENDORED_RIME_ROOT/dist/bin/rime_deployer"; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
       return 0
     fi
-    return 1
-  fi
+  done
+  return 1
+}
 
-  [[ "${CI:-}" != "true" ]]
+should_auto_bootstrap_librime() {
+  [[ "${LEFTIO_AUTO_BOOTSTRAP_LIBRIME:-0}" == "1" ]]
 }
 
 ensure_vendored_librime() {
@@ -67,7 +73,17 @@ ensure_vendored_librime() {
   fi
 
   if ! should_auto_bootstrap_librime; then
-    return 0
+    if [[ "${LEFTIO_ALLOW_LEXICON_ONLY:-0}" == "1" ]]; then
+      echo "Warning: building without bundled librime; indexed lexicon fallback only." >&2
+      return 0
+    fi
+    cat >&2 <<'MESSAGE'
+Vendored librime or its data is missing.
+Run `make build-vendored-librime`, or opt in to network bootstrap with
+LEFTIO_AUTO_BOOTSTRAP_LIBRIME=1. Use LEFTIO_ALLOW_LEXICON_ONLY=1 only for an
+explicit fallback-only development build.
+MESSAGE
+    exit 1
   fi
 
   echo "Vendored librime is missing. Bootstrapping it now..." >&2
@@ -80,9 +96,54 @@ detect_signing_identity() {
     | head -n 1
 }
 
+verify_architectures() {
+  local binary="$1"
+  local architectures
+  architectures="$(lipo -archs "$binary")"
+  local required
+  for required in $ARCHS; do
+    if [[ " $architectures " != *" $required "* ]]; then
+      echo "$binary is missing $required (contains: $architectures)." >&2
+      exit 1
+    fi
+  done
+}
+
+sign_binary() {
+  local target="$1"
+  if [[ -z "$SIGNING_IDENTITY" ]]; then
+    codesign --force --sign - "$target"
+    return 0
+  fi
+
+  local arguments=(--force --options runtime --sign "$SIGNING_IDENTITY")
+  if [[ "$SIGNING_IDENTITY" == "Developer ID Application:"* ]]; then
+    arguments=(--force --options runtime --timestamp --sign "$SIGNING_IDENTITY")
+  fi
+  codesign "${arguments[@]}" "$target"
+}
+
 SDKROOT_OVERRIDE="${LEFTIO_SDKROOT:-$(preferred_input_method_sdkroot || true)}"
 MIN_SYSTEM_VERSION="${LEFTIO_MIN_SYSTEM_VERSION:-$MIN_SYSTEM_VERSION}"
 SIGNING_IDENTITY="${LEFTIO_SIGNING_IDENTITY:-$(detect_signing_identity)}"
+
+if [[ ! "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+  echo "LEFTIO_VERSION must contain exactly 3 dot-separated numeric components." >&2
+  exit 1
+fi
+if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
+  echo "LEFTIO_BUILD_NUMBER must contain 1-3 dot-separated numeric components." >&2
+  exit 1
+fi
+if [[ ! "$MIN_SYSTEM_VERSION" =~ ^[0-9]+([.][0-9]+){1,2}$ ]]; then
+  echo "LEFTIO_MIN_SYSTEM_VERSION must contain 2-3 numeric components." >&2
+  exit 1
+fi
+if [[ "${LEFTIO_REQUIRE_DEVELOPER_ID:-0}" == "1" ]] &&
+   [[ "$SIGNING_IDENTITY" != "Developer ID Application:"* ]]; then
+  echo "A Developer ID Application identity is required for a release build." >&2
+  exit 1
+fi
 
 cd "$ROOT_DIR"
 
@@ -96,21 +157,42 @@ if [[ -n "$MIN_SYSTEM_VERSION" ]]; then
   SWIFT_BUILD_ENV+=("MACOSX_DEPLOYMENT_TARGET=$MIN_SYSTEM_VERSION")
 fi
 
-env "${SWIFT_BUILD_ENV[@]}" swift build -c release --product "$INPUT_PRODUCT_NAME"
-BIN_DIR="$(env "${SWIFT_BUILD_ENV[@]}" swift build -c release --show-bin-path)"
+SWIFT_ARCH_ARGUMENTS=()
+for architecture in $ARCHS; do
+  case "$architecture" in
+    arm64|x86_64)
+      SWIFT_ARCH_ARGUMENTS+=(--arch "$architecture")
+      ;;
+    *)
+      echo "Unsupported LEFTIO_ARCHS entry: $architecture" >&2
+      exit 1
+      ;;
+  esac
+done
+if [[ "${#SWIFT_ARCH_ARGUMENTS[@]}" -eq 0 ]]; then
+  echo "LEFTIO_ARCHS must name at least one architecture." >&2
+  exit 1
+fi
+
+env "${SWIFT_BUILD_ENV[@]}" swift build -c release --product "$INPUT_PRODUCT_NAME" "${SWIFT_ARCH_ARGUMENTS[@]}"
+BIN_DIR="$(env "${SWIFT_BUILD_ENV[@]}" swift build -c release --show-bin-path "${SWIFT_ARCH_ARGUMENTS[@]}")"
 
 rm -rf "$APP_DIR"
 mkdir -p \
   "$APP_DIR/Contents/MacOS" \
   "$RESOURCES_DIR" \
   "$FRAMEWORKS_DIR" \
-  "$RESOURCES_DIR/Rime"
+  "$RESOURCES_DIR/Rime" \
+  "$RESOURCES_DIR/Licenses"
 
 cp "$BIN_DIR/$INPUT_PRODUCT_NAME" "$APP_DIR/Contents/MacOS/$APP_EXECUTABLE_NAME"
 if [[ -d "$RIME_MINIMAL_DIR" ]]; then
   cp "$RIME_MINIMAL_DIR"/* "$RESOURCES_DIR/Rime/"
 fi
 cp "$ROOT_DIR"/data/*.yaml "$RESOURCES_DIR/Rime/"
+cp "$ROOT_DIR/LICENSE" "$RESOURCES_DIR/LICENSE.txt"
+cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
+cp "$ROOT_DIR"/LICENSES/* "$RESOURCES_DIR/Licenses/"
 cat > "$RESOURCES_DIR/InfoPlist.strings" <<STRINGS
 "CFBundleDisplayName" = "LeftIO 单手九宫格";
 "CFBundleName" = "LeftIO";
@@ -120,6 +202,41 @@ STRINGS
 VENDORED_LIBRIME_PATH="${LEFTIO_LIBRIME_DYLIB:-$(detect_vendored_librime || true)}"
 if [[ -n "$VENDORED_LIBRIME_PATH" ]]; then
   cp "$VENDORED_LIBRIME_PATH" "$FRAMEWORKS_DIR/"
+
+  RIME_DEPLOYER="$(detect_rime_deployer || true)"
+  if [[ -z "$RIME_DEPLOYER" ]]; then
+    echo "Bundled librime is present, but rime_deployer is missing." >&2
+    exit 1
+  fi
+  RIME_PREBUILT_DIR="$RESOURCES_DIR/Rime/build"
+  RIME_PRECOMPILE_USER_DIR="$BUILD_DIR/rime-precompile-user"
+  rm -rf "$RIME_PREBUILT_DIR" "$RIME_PRECOMPILE_USER_DIR"
+  mkdir -p "$RIME_PREBUILT_DIR" "$RIME_PRECOMPILE_USER_DIR"
+  cp \
+    "$ROOT_DIR/data/prebuild/default.custom.yaml" \
+    "$RIME_PRECOMPILE_USER_DIR/default.custom.yaml"
+  "$RIME_DEPLOYER" --build \
+    "$RIME_PRECOMPILE_USER_DIR" \
+    "$RESOURCES_DIR/Rime" \
+    "$RIME_PREBUILT_DIR"
+  rm -f "$RIME_PREBUILT_DIR"/*.table.txt
+  for artifact in \
+    default.yaml \
+    onehand_t9.schema.yaml \
+    onehand_t9.prism.bin \
+    onehand_t9.table.bin \
+    onehand_t9.reverse.bin; do
+    if [[ ! -f "$RIME_PREBUILT_DIR/$artifact" ]]; then
+      echo "Rime precompile did not produce $artifact." >&2
+      exit 1
+    fi
+  done
+  rm -rf "$RIME_PRECOMPILE_USER_DIR"
+fi
+
+verify_architectures "$APP_DIR/Contents/MacOS/$APP_EXECUTABLE_NAME"
+if [[ -n "$VENDORED_LIBRIME_PATH" ]]; then
+  verify_architectures "$FRAMEWORKS_DIR/$(basename "$VENDORED_LIBRIME_PATH")"
 fi
 
 APP_ICON_PPM="$BUILD_DIR/app_icon.ppm"
@@ -130,7 +247,8 @@ MENU_ICON_TIFF="$RESOURCES_DIR/menu_icon.tiff"
 MENU_ICON_PDF="$RESOURCES_DIR/menu_icon@2x.pdf"
 python3 - "$APP_ICON_PPM" "$MENU_ICON_PNG" "$MENU_ICON_PNG_2X" "$MENU_ICON_PNG_4X" "$MENU_ICON_PDF" <<'PY'
 import sys
-from PIL import Image, ImageDraw
+import struct
+import zlib
 
 app_path, menu_path, menu_2x_path, menu_4x_path, menu_pdf_path = sys.argv[1:6]
 
@@ -172,25 +290,42 @@ def app_pixel(x, y):
 
     return (r, g, b)
 
-def menu_icon(size):
-    scale = size / 16
-    icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(icon)
-    ink = (0, 0, 0, 255)
+def write_png(path, width, height, pixel):
+    def chunk(kind, payload):
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
 
+    rows = []
+    for y in range(height):
+        row = bytearray([0])
+        for x in range(width):
+            row.extend(pixel(x, y))
+        rows.append(bytes(row))
+
+    contents = b"\x89PNG\r\n\x1a\n"
+    contents += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    contents += chunk(b"IDAT", zlib.compress(b"".join(rows), level=9))
+    contents += chunk(b"IEND", b"")
+    with open(path, "wb") as file:
+        file.write(contents)
+
+def menu_pixel(size, x, y):
+    scale = size / 16
     # Template image: black alpha mask only. TIS recolors this for light,
     # dark, selected, and Fn-picker contexts when TISIconIsTemplate is set.
-    draw.rounded_rectangle(
-        (round(4 * scale), round(3 * scale), round(6 * scale), round(12 * scale)),
-        radius=max(1, round(1 * scale)),
-        fill=ink,
+    vertical = (
+        round(4 * scale) <= x <= round(6 * scale)
+        and round(3 * scale) <= y <= round(12 * scale)
     )
-    draw.rounded_rectangle(
-        (round(4 * scale), round(10 * scale), round(10 * scale), round(12 * scale)),
-        radius=max(1, round(1 * scale)),
-        fill=ink,
+    horizontal = (
+        round(4 * scale) <= x <= round(10 * scale)
+        and round(10 * scale) <= y <= round(12 * scale)
     )
-    return icon
+    return (0, 0, 0, 255) if vertical or horizontal else (0, 0, 0, 0)
 
 def write_menu_pdf(path):
     # Match the system input methods that feed the Fn picker through
@@ -222,12 +357,9 @@ def write_menu_pdf(path):
 
 write_ppm(app_path, 1024, 1024, app_pixel)
 
-icon_16 = menu_icon(16)
-icon_32 = menu_icon(32)
-icon_64 = menu_icon(64)
-icon_16.save(menu_path)
-icon_32.save(menu_2x_path)
-icon_64.save(menu_4x_path)
+write_png(menu_path, 16, 16, lambda x, y: menu_pixel(16, x, y))
+write_png(menu_2x_path, 32, 32, lambda x, y: menu_pixel(32, x, y))
+write_png(menu_4x_path, 64, 64, lambda x, y: menu_pixel(64, x, y))
 write_menu_pdf(menu_pdf_path)
 PY
 
@@ -284,7 +416,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>$VERSION</string>
   <key>CFBundleSignature</key>
   <string>????</string>
   <key>CFBundleSupportedPlatforms</key>
@@ -292,7 +424,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>MacOSX</string>
   </array>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>$BUILD_NUMBER</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.utilities</string>
   <key>LSBackgroundOnly</key>
@@ -344,7 +476,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
         <key>tsInputModePrimaryInScriptKey</key>
         <true/>
         <key>tsInputModeScriptKey</key>
-        <string>smSimpChinese</string>
+        <string>smUnicodeScript</string>
       </dict>
     </dict>
     <key>tsVisibleInputModeOrderedArrayKey</key>
@@ -376,7 +508,6 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <array>
     <string>Hans</string>
     <string>Hant</string>
-    <string>Latn</string>
   </array>
   <key>tsInputMethodIconFileKey</key>
   <string>menu_icon.tiff</string>
@@ -389,21 +520,22 @@ printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 plutil -lint "$APP_DIR/Contents/Info.plist"
 if [[ -d "$FRAMEWORKS_DIR" ]]; then
   while IFS= read -r framework_binary; do
-    if [[ -n "$SIGNING_IDENTITY" ]]; then
-      codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$framework_binary"
-    else
-      codesign --force --sign - "$framework_binary"
-    fi
+    sign_binary "$framework_binary"
   done < <(find "$FRAMEWORKS_DIR" -type f \( -name '*.dylib' -o -name '*.framework' \) -print)
 fi
-if [[ -n "$SIGNING_IDENTITY" ]]; then
-  codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR"
-else
-  codesign --force --sign - "$APP_DIR"
-fi
+sign_binary "$APP_DIR"
 xattr -cr "$APP_DIR" 2>/dev/null || true
 xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
 xattr -dr com.apple.provenance "$APP_DIR" 2>/dev/null || true
 xattr -dr com.apple.macl "$APP_DIR" 2>/dev/null || true
+if ! APP_ATTRIBUTES="$(xattr -lr "$APP_DIR" 2>&1)"; then
+  echo "Unable to inspect built app extended attributes: $APP_ATTRIBUTES" >&2
+  exit 1
+fi
+if grep -Eq 'com\.apple\.(quarantine|macl)' <<<"$APP_ATTRIBUTES"; then
+  echo "Built app still contains quarantine or macl metadata." >&2
+  exit 1
+fi
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 echo "$APP_DIR"

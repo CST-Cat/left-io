@@ -157,7 +157,7 @@ public final class OneHandLexiconSession: OneHandSession {
         (currentPageIndex + 1) * pageSize < allCandidates.count
     }
 
-    private func commitDisplayedCandidate(at index: Int) {
+    public func commitDisplayedCandidate(at index: Int) {
         guard displayedCandidates.indices.contains(index) else {
             return
         }

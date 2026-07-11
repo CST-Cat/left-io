@@ -20,12 +20,32 @@ fi
 
 echo "== Installed bundle =="
 echo "$INSTALLED_APP"
-/usr/libexec/PlistBuddy \
-  -c 'Print :CFBundleIdentifier' \
-  -c 'Print :CFBundleExecutable' \
-  -c 'Print :InputMethodConnectionName' \
-  -c 'Print :InputMethodServerControllerClass' \
-  "$INSTALLED_APP/Contents/Info.plist"
+INFO_PLIST="$INSTALLED_APP/Contents/Info.plist"
+[[ -f "$INFO_PLIST" ]] || {
+  echo "missing Info.plist: $INFO_PLIST" >&2
+  exit 2
+}
+BUNDLE_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")"
+BUNDLE_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")"
+CONNECTION_NAME="$(/usr/libexec/PlistBuddy -c 'Print :InputMethodConnectionName' "$INFO_PLIST")"
+CONTROLLER_CLASS="$(/usr/libexec/PlistBuddy -c 'Print :InputMethodServerControllerClass' "$INFO_PLIST")"
+printf '%s\n' "$BUNDLE_IDENTIFIER" "$BUNDLE_EXECUTABLE" "$CONNECTION_NAME" "$CONTROLLER_CLASS"
+[[ "$BUNDLE_IDENTIFIER" == "$APP_BUNDLE_ID" ]] || {
+  echo "unexpected bundle identifier: $BUNDLE_IDENTIFIER" >&2
+  exit 2
+}
+[[ "$BUNDLE_EXECUTABLE" == "LeftIO" ]] || {
+  echo "unexpected bundle executable: $BUNDLE_EXECUTABLE" >&2
+  exit 2
+}
+[[ "$CONNECTION_NAME" == "${APP_BUNDLE_ID}_Connection" ]] || {
+  echo "unexpected input method connection: $CONNECTION_NAME" >&2
+  exit 2
+}
+[[ "$CONTROLLER_CLASS" == "LeftIOInputController" ]] || {
+  echo "unexpected input method controller: $CONTROLLER_CLASS" >&2
+  exit 2
+}
 
 echo
 echo "== Code signature =="
@@ -33,8 +53,20 @@ codesign -vvv --deep --strict "$INSTALLED_APP" 2>&1
 
 echo
 echo "== Extended attributes =="
-if xattr -lr "$INSTALLED_APP" 2>/dev/null | rg 'quarantine|provenance'; then
-  echo "warning: quarantine/provenance attributes are still present"
+if ! ALL_ATTRIBUTES="$(xattr -lr "$INSTALLED_APP" 2>&1)"; then
+  echo "unable to inspect extended attributes: $ALL_ATTRIBUTES" >&2
+  exit 4
+fi
+UNSAFE_ATTRIBUTE_OUTPUT="$(grep -E 'com\.apple\.(quarantine|macl)' <<<"$ALL_ATTRIBUTES" || true)"
+if [[ -n "$UNSAFE_ATTRIBUTE_OUTPUT" ]]; then
+  printf '%s\n' "$UNSAFE_ATTRIBUTE_OUTPUT"
+  echo "error: quarantine or macl attributes are still present" >&2
+  exit 4
+fi
+PROVENANCE_OUTPUT="$(grep -F 'com.apple.provenance' <<<"$ALL_ATTRIBUTES" || true)"
+if [[ -n "$PROVENANCE_OUTPUT" ]]; then
+  printf '%s\n' "$PROVENANCE_OUTPUT"
+  echo "warning: provenance attributes are present; TIS verification must still pass"
 else
   echo "ok: no quarantine/provenance attributes found"
 fi
@@ -56,6 +88,18 @@ func value(_ source: TISInputSource, _ property: CFString?) -> String {
     return String(describing: unsafeBitCast(rawValue, to: CFTypeRef.self))
 }
 
+func boolValue(_ source: TISInputSource, _ property: CFString?) -> Bool? {
+    guard let property,
+          let rawValue = TISGetInputSourceProperty(source, property) else {
+        return nil
+    }
+    let value = unsafeBitCast(rawValue, to: CFTypeRef.self)
+    guard CFGetTypeID(value) == CFBooleanGetTypeID() else {
+        return nil
+    }
+    return CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self))
+}
+
 let allSources = TISCreateInputSourceList(nil, true)?.takeRetainedValue() as? [AnyObject] ?? []
 print("all", allSources.count)
 
@@ -65,6 +109,8 @@ var selectedMode = false
 var enabledBundle = false
 var enabledMode = false
 var selectCapableMode = false
+var bundleParentCount = 0
+var modeCount = 0
 
 for anySource in allSources {
     let source = unsafeBitCast(anySource, to: TISInputSource.self)
@@ -89,14 +135,16 @@ for anySource in allSources {
     if bundleID == appBundleID {
         foundBundle = true
         if sourceID == appBundleID {
-            enabledBundle = value(source, kTISPropertyInputSourceIsEnabled) == "1"
+            bundleParentCount += 1
+            enabledBundle = enabledBundle || boolValue(source, kTISPropertyInputSourceIsEnabled) == true
         }
     }
     if sourceID == modeID || inputModeID == modeID {
         foundMode = true
-        enabledMode = value(source, kTISPropertyInputSourceIsEnabled) == "1"
-        selectCapableMode = value(source, kTISPropertyInputSourceIsSelectCapable) == "1"
-        selectedMode = value(source, kTISPropertyInputSourceIsSelected) == "1"
+        modeCount += 1
+        enabledMode = enabledMode || boolValue(source, kTISPropertyInputSourceIsEnabled) == true
+        selectCapableMode = selectCapableMode || boolValue(source, kTISPropertyInputSourceIsSelectCapable) == true
+        selectedMode = selectedMode || boolValue(source, kTISPropertyInputSourceIsSelected) == true
     }
 }
 
@@ -110,11 +158,16 @@ print("bundleEnabled=\(enabledBundle)")
 print("modeEnabled=\(enabledMode)")
 print("modeSelectCapable=\(selectCapableMode)")
 print("selected=\(selectedMode)")
+print("bundleParentCount=\(bundleParentCount)")
+print("modeCount=\(modeCount)")
 
 if !foundBundle || !foundMode {
     exit(2)
 }
 if !enabledBundle || !enabledMode || !selectCapableMode {
     exit(3)
+}
+if bundleParentCount != 1 || modeCount != 1 {
+    exit(4)
 }
 '

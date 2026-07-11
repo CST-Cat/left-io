@@ -10,6 +10,11 @@ real Rime phrase frequencies for rows without an explicit weight.
 Examples:
     你好    ni hao    1000
     输入法  shu ru fa 800
+
+Phrase pronunciations that are not present in the source dictionary can be
+provided explicitly with --supplement. This is intentionally preferred over
+guessing a phrase from one "primary" reading per character: that guess is
+wrong for words such as 银行 and 重庆.
 """
 
 from __future__ import annotations
@@ -46,7 +51,7 @@ class Entry:
 @dataclass(frozen=True)
 class ParsedRows:
     entries: list[Entry]
-    primary_character_codes: dict[str, str]
+    unambiguous_character_codes: dict[str, str]
 
 
 def has_cjk_text(word: str) -> bool:
@@ -134,7 +139,7 @@ def load_essay_frequencies(path: Path | None) -> dict[str, int]:
 
 def parse_rows(lines: list[str], essay_frequencies: dict[str, int]) -> ParsedRows:
     entries: list[Entry] = []
-    character_readings: dict[str, tuple[int, str]] = {}
+    character_codes: dict[str, set[str]] = {}
     for line_number, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -169,19 +174,24 @@ def parse_rows(lines: list[str], essay_frequencies: dict[str, int]) -> ParsedRow
 
         entries.append(Entry(word=word, code=code, weight=weight))
         if len(word) == 1:
-            current = character_readings.get(word)
-            if current is None or weight > current[0]:
-                character_readings[word] = (weight, code)
+            character_codes.setdefault(word, set()).add(code)
 
     return ParsedRows(
         entries=entries,
-        primary_character_codes={word: code for word, (_, code) in character_readings.items()}
+        # Phrase readings cannot be reconstructed safely from a single
+        # highest-weight pronunciation of each character. Only derive a phrase
+        # when every character has one unambiguous T9 code in the source data.
+        unambiguous_character_codes={
+            word: next(iter(codes))
+            for word, codes in character_codes.items()
+            if len(codes) == 1
+        }
     )
 
 
 def derive_essay_phrase_entries(
     essay_frequencies: dict[str, int],
-    primary_character_codes: dict[str, str],
+    unambiguous_character_codes: dict[str, str],
     existing_entries: list[Entry]
 ) -> list[Entry]:
     seen = {(entry.word, entry.code) for entry in existing_entries}
@@ -193,7 +203,7 @@ def derive_essay_phrase_entries(
 
         codes: list[str] = []
         for character in phrase:
-            code = primary_character_codes.get(character)
+            code = unambiguous_character_codes.get(character)
             if code is None:
                 break
             codes.append(code)
@@ -263,6 +273,15 @@ def main() -> int:
         action="store_true",
         help="Use essay.txt for weights only; do not derive phrase rows from it."
     )
+    parser.add_argument(
+        "--supplement",
+        action="append",
+        default=[],
+        help=(
+            "Additional word/pinyin/weight rows with explicit phrase readings. "
+            "May be supplied more than once."
+        )
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -279,11 +298,14 @@ def main() -> int:
     with input_path.open("r", encoding="utf-8") as file:
         parsed = parse_rows(file.readlines(), essay_frequencies)
 
-    entries = parsed.entries
+    entries = list(parsed.entries)
+    for supplement in args.supplement:
+        with Path(supplement).open("r", encoding="utf-8") as file:
+            entries += parse_rows(file.readlines(), essay_frequencies).entries
     if essay_frequencies and not args.no_essay_phrases:
         entries += derive_essay_phrase_entries(
             essay_frequencies,
-            parsed.primary_character_codes,
+            parsed.unambiguous_character_codes,
             entries
         )
     entries = deduplicated(entries)

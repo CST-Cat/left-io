@@ -15,12 +15,14 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate source only
+    name: Validate source and distribution
     runs-on: macos-15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Select Xcode
         run: |
@@ -41,8 +43,23 @@ jobs:
             exit 1
           fi
 
+      - name: Build pinned universal librime
+        run: make build-vendored-librime
+
+      - name: Rime ABI truncation guard
+        run: make test-rime-abi
+
+      - name: C bridge warnings are errors
+        run: >-
+          xcrun clang -std=c11 -Wall -Wextra -Wpedantic -Werror
+          -I Sources/CRimeBridge/include -c Sources/CRimeBridge/CRimeBridge.c
+          -o /tmp/CRimeBridge.o
+
       - name: SwiftPM tests
         run: make test
+
+      - name: Warnings are errors
+        run: swift build -Xswiftc -warnings-as-errors
 
       - name: Xcode package tests
         run: make xcodebuild-test
@@ -52,9 +69,24 @@ jobs:
           python3 scripts/generate_onehand_t9_dict.py scripts/sample_pinyin.tsv > /tmp/onehand_t9.dict.yaml
           grep -F "你好	64'426	1000" /tmp/onehand_t9.dict.yaml
 
+      - name: Production dictionary is reproducible
+        run: |
+          python3 scripts/generate_onehand_t9_dict.py \
+            vendor/librime/data/minimal/luna_pinyin.dict.yaml \
+            --supplement data/onehand_t9_phrases.tsv \
+            > /tmp/onehand_t9-production.dict.yaml
+          cmp data/onehand_t9.dict.yaml /tmp/onehand_t9-production.dict.yaml
+
+      - name: Build and inspect universal DMG
+        run: |
+          make build-dmg
+          make test-prebuilt-rime
+          make test-install-transactions
+          make verify-distribution
+
       - name: Guard distributable artifacts
         run: |
           if git ls-files | grep -Ei '\.(dmg|pkg|xcarchive)$'; then
-            echo "Distributable artifact found in checkout. DMGs are intentionally not built or uploaded by CI." >&2
+            echo "Distributable artifact was committed to the source checkout." >&2
             exit 1
           fi

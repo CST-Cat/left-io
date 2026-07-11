@@ -31,6 +31,8 @@ public final class OneHandRecordingSession: OneHandSession {
 
     public func commitCurrentComposition() {}
 
+    public func commitDisplayedCandidate(at index: Int) {}
+
     public func commitDisplayedCandidate(matching text: String) {}
 
     public func expandedCandidateWindow(startingAt startIndex: Int, limit: Int) -> [String] {

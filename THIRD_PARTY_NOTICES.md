@@ -29,7 +29,10 @@ The generated table keeps the upstream lexical data and transforms pinyin
 readings into LeftIO T9 codes. Regenerate it with:
 
 ```sh
-python3 scripts/generate_onehand_t9_dict.py vendor/librime/data/minimal/luna_pinyin.dict.yaml > data/onehand_t9.dict.yaml
+python3 scripts/generate_onehand_t9_dict.py \
+  vendor/librime/data/minimal/luna_pinyin.dict.yaml \
+  --supplement data/onehand_t9_phrases.tsv \
+  > data/onehand_t9.dict.yaml
 ```
 
 ## Rime Engine

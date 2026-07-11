@@ -2,6 +2,15 @@ import XCTest
 @testable import OneHand
 
 final class SymbolLayerTests: XCTestCase {
+    func testSymbolLayerIgnoresQSlotConfigurations() {
+        let configuration = OneHandConfiguration(symbols: [.q: .text("?")], symbolLayerAutoReturns: true)
+        var symbolLayer = SymbolLayerController(configuration: configuration)
+
+        _ = symbolLayer.enter()
+
+        XCTAssertNil(symbolLayer.action(for: .q))
+    }
+
     func testSymbolLayerInsertsConfiguredTextAndAutoReturns() {
         let configuration = OneHandConfiguration(symbols: [.w: .text("，")], symbolLayerAutoReturns: true)
         var machine = OneHandStateMachine(configuration: configuration)

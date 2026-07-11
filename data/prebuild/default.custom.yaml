@@ -1,0 +1,6 @@
+# Build-time-only Rime workspace selection. The application chooses the
+# onehand_t9 schema directly, and the packaged prebuilt workspace needs no
+# unrelated preset schemas.
+patch:
+  schema_list:
+    - schema: onehand_t9

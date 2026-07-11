@@ -76,6 +76,16 @@ final class OneHandLexiconSessionTests: XCTestCase {
         XCTAssertEqual(session.displayedCandidates, [])
     }
 
+    func testCommitDisplayedCandidateByIndexCommitsRequestedCandidate() {
+        let session = OneHandLexiconSession(lexicon: .seed)
+        session.apply(.inputT9Code("6"))
+        session.apply(.inputT9Code("4"))
+
+        session.commitDisplayedCandidate(at: 1)
+
+        XCTAssertEqual(session.takeClientActions(), [.insertText("你好")])
+    }
+
     func testDeleteBackwardRefreshesCandidatesAndFallsBackToClientDelete() {
         let session = OneHandLexiconSession(lexicon: .seed)
 

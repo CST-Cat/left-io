@@ -31,6 +31,17 @@ final class OneHandRimeSessionTests: XCTestCase {
         XCTAssertTrue(session.displayedCandidates.isEmpty)
     }
 
+    func testCommitDisplayedCandidateByIndexUsesCurrentPageIndex() {
+        let bridge = FakeOneHandRimeBridge()
+        let session = OneHandRimeSession(bridge: bridge)
+
+        session.apply(.inputT9Code("2"))
+        session.commitDisplayedCandidate(at: 1)
+
+        XCTAssertEqual(bridge.selectedIndices, [1])
+        XCTAssertEqual(session.takeClientActions(), [.insertText("次选2")])
+    }
+
     func testCommitCompositionFallsBackToLiteralTextWithoutCandidates() {
         let bridge = FakeOneHandRimeBridge(
             input: "64",

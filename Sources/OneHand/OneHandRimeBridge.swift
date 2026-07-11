@@ -10,6 +10,7 @@ public protocol OneHandSession: AnyObject {
     func apply(_ action: OneHandAction)
     func takeClientActions() -> [OneHandClientAction]
     func commitCurrentComposition()
+    func commitDisplayedCandidate(at index: Int)
     func commitDisplayedCandidate(matching text: String)
     func commitExpandedCandidate(at index: Int)
     func setAsciiMode(_ enabled: Bool)
@@ -42,6 +43,10 @@ public final class AnyOneHandSession: OneHandSession {
 
     public func commitCurrentComposition() {
         session.commitCurrentComposition()
+    }
+
+    public func commitDisplayedCandidate(at index: Int) {
+        session.commitDisplayedCandidate(at: index)
     }
 
     public func commitDisplayedCandidate(matching text: String) {
@@ -85,7 +90,8 @@ final class LiveOneHandRimeBridge: OneHandRimeBridgeClient {
         sharedDataDirectory: URL,
         userDataDirectory: URL,
         schemaId: String,
-        appName: String
+        appName: String,
+        distributionVersion: String = "0.1.0"
     ) throws {
         Self.configureDynamicLibrarySearchPath()
         try FileManager.default.createDirectory(
@@ -97,7 +103,15 @@ final class LiveOneHandRimeBridge: OneHandRimeBridgeClient {
             userDataDirectory.path.withCString { userDataPath in
                 schemaId.withCString { schemaCString in
                     appName.withCString { appNameCString in
-                        OneHandRimeBridgeCreate(sharedDataPath, userDataPath, schemaCString, appNameCString)
+                        distributionVersion.withCString { versionCString in
+                            OneHandRimeBridgeCreate(
+                                sharedDataPath,
+                                userDataPath,
+                                schemaCString,
+                                appNameCString,
+                                versionCString
+                            )
+                        }
                     }
                 }
             }
@@ -267,16 +281,37 @@ public final class OneHandRimeSession: OneHandSession {
         userDataDirectory: URL,
         schemaId: String = "onehand_t9",
         appName: String = "rime.leftio",
+        distributionVersion: String? = nil,
         pageSize: Int = 4
     ) throws {
         self.bridge = try LiveOneHandRimeBridge(
             sharedDataDirectory: sharedDataDirectory,
             userDataDirectory: userDataDirectory,
             schemaId: schemaId,
-            appName: appName
+            appName: appName,
+            distributionVersion: distributionVersion
+                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                ?? "0.1.0"
         )
         self.pageSize = pageSize
         refreshState()
+    }
+
+    public convenience init(
+        sharedDataDirectory: URL,
+        userDataDirectory: URL,
+        schemaId: String,
+        appName: String,
+        pageSize: Int
+    ) throws {
+        try self.init(
+            sharedDataDirectory: sharedDataDirectory,
+            userDataDirectory: userDataDirectory,
+            schemaId: schemaId,
+            appName: appName,
+            distributionVersion: nil,
+            pageSize: pageSize
+        )
     }
 
     init(
@@ -358,6 +393,15 @@ public final class OneHandRimeSession: OneHandSession {
             _ = bridge.commitComposition()
         }
 
+        drainCommitText()
+        refreshState()
+    }
+
+    public func commitDisplayedCandidate(at index: Int) {
+        guard displayedCandidates.indices.contains(index) else {
+            return
+        }
+        _ = bridge.selectCandidateOnCurrentPage(index)
         drainCommitText()
         refreshState()
     }

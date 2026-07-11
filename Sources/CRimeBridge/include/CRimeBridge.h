@@ -16,7 +16,8 @@ typedef struct OneHandRimeBridgeHandle {
 OneHandRimeBridgeHandle* OneHandRimeBridgeCreate(const char* shared_data_dir,
                                                  const char* user_data_dir,
                                                  const char* schema_id,
-                                                 const char* app_name);
+                                                 const char* app_name,
+                                                 const char* distribution_version);
 void OneHandRimeBridgeDestroy(OneHandRimeBridgeHandle* handle);
 
 const char* OneHandRimeBridgeGetLastError(void);

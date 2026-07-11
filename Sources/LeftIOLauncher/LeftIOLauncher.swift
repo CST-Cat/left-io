@@ -5,8 +5,8 @@ import Foundation
 @main
 @MainActor
 final class LeftIOLauncher: NSObject, NSApplicationDelegate {
-    private let systemInstallURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
-    private let userInstallURL = URL(fileURLWithPath: ("~/Applications" as NSString).expandingTildeInPath, isDirectory: true)
+    private let systemInputMethodsURL = URL(fileURLWithPath: "/Library/Input Methods", isDirectory: true)
+    private let userInputMethodsURL = URL(fileURLWithPath: ("~/Library/Input Methods" as NSString).expandingTildeInPath, isDirectory: true)
     private let bundleIdentifier = "io.github.cstcat.inputmethod.leftio" as CFString
     private let inputModeIdentifier = "io.github.cstcat.inputmethod.leftio.onehandt9" as CFString
 
@@ -32,10 +32,10 @@ final class LeftIOLauncher: NSObject, NSApplicationDelegate {
     }
 
     private func launchMessage() -> (String, String) {
-        guard isInstalledInApplicationsFolder() else {
+        guard isInstalledInInputMethodsFolder() else {
             return (
-                "把 LeftIO 拖到 Applications",
-                "这个 app 本身就是输入法容器。请把 LeftIO.app 拖到 DMG 里的 Applications 快捷方式，不需要再打开别的安装器。"
+                "打开 LeftIO.app 安装",
+                "请从 DMG 打开 LeftIO.app 或 Install LeftIO.command。LeftIO 会复制到 ~/Library/Input Methods，不需要拖到 Applications。"
             )
         }
 
@@ -58,52 +58,80 @@ final class LeftIOLauncher: NSObject, NSApplicationDelegate {
         case .notRegistered:
             return (
                 "LeftIO 已安装",
-                "app 已复制到 Applications，但系统还没把输入法注册出来。请先注销后重新登录，再去“系统设置 > 键盘 > 文本输入”里检查。"
+                "app 已复制到 Input Methods，但系统还没把输入法注册出来。请先注销后重新登录，再去“系统设置 > 键盘 > 文本输入”里检查。"
+            )
+        case .duplicateSources:
+            return (
+                "LeftIO 来源重复",
+                "系统检测到多个 LeftIO 父来源或输入模式。请运行 make repair-input-method-sources 后再检查。"
+            )
+        case .enableFailed:
+            return (
+                "LeftIO 启用失败",
+                "TIS 未能启用 LeftIO 父来源和输入模式，或该模式当前不可选。请重新安装并运行 make verify-input-method。"
             )
         }
     }
 
-    private func isInstalledInApplicationsFolder() -> Bool {
+    private func isInstalledInInputMethodsFolder() -> Bool {
         let bundleURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
         let parentDirectory = bundleURL.deletingLastPathComponent().path
-        return parentDirectory == systemInstallURL.path || parentDirectory == userInstallURL.path
+        return parentDirectory == systemInputMethodsURL.path || parentDirectory == userInputMethodsURL.path
     }
 
     private func prepareInstalledInputSource() -> ActivationResult {
-        guard let currentInputMode = currentSourceID(),
-              currentInputMode == inputModeIdentifier as String else {
-            return enableInputSource()
+        let result = enableInputSource()
+        guard case .enabled = result else {
+            return result
         }
 
-        return .alreadySelected
+        return currentSourceID() == inputModeIdentifier as String
+            ? .alreadySelected
+            : .enabled
     }
 
     private func enableInputSource() -> ActivationResult {
-        guard let keyboardInputMethod = firstMatchingInputSource(
+        let bundleSources = matchingInputSources(
             property: kTISPropertyBundleID,
             value: bundleIdentifier,
             includeAllInstalled: true
-        ) else {
+        )
+        let parentSources = bundleSources.filter { source in
+            stringProperty(kTISPropertyInputSourceID, for: source) == bundleIdentifier as String
+        }
+        guard !parentSources.isEmpty else {
             return .notRegistered
         }
 
-        _ = TISEnableInputSource(keyboardInputMethod)
-
-        let inputMode = firstMatchingInputSource(
-            property: kTISPropertyInputSourceID,
-            value: inputModeIdentifier,
-            includeAllInstalled: true
-        ) ?? firstMatchingInputSource(
-            property: kTISPropertyInputModeID,
-            value: inputModeIdentifier,
+        let allSources = matchingInputSources(
+            property: nil,
+            value: kCFNull,
             includeAllInstalled: true
         )
-
-        guard let inputMode else {
+        let inputModes = allSources.filter { source in
+            stringProperty(kTISPropertyInputSourceID, for: source) == inputModeIdentifier as String
+                || stringProperty(kTISPropertyInputModeID, for: source) == inputModeIdentifier as String
+        }
+        guard !inputModes.isEmpty else {
             return .registeredButModeMissing
         }
+        guard parentSources.count == 1, inputModes.count == 1 else {
+            return .duplicateSources
+        }
 
-        _ = TISEnableInputSource(inputMode)
+        let parent = parentSources[0]
+        let inputMode = inputModes[0]
+        guard TISEnableInputSource(parent) == noErr,
+              TISEnableInputSource(inputMode) == noErr else {
+            return .enableFailed
+        }
+        drainRunLoop(for: 1.5)
+        guard
+              boolProperty(kTISPropertyInputSourceIsEnabled, for: parent) == true,
+              boolProperty(kTISPropertyInputSourceIsEnabled, for: inputMode) == true,
+              boolProperty(kTISPropertyInputSourceIsSelectCapable, for: inputMode) == true else {
+            return .enableFailed
+        }
         return .enabled
     }
 
@@ -114,22 +142,26 @@ final class LeftIOLauncher: NSObject, NSApplicationDelegate {
         return stringProperty(kTISPropertyInputSourceID, for: source)
     }
 
-    private func firstMatchingInputSource(
+    private func drainRunLoop(for duration: TimeInterval) {
+        let deadline = Date().addingTimeInterval(duration)
+        while deadline.timeIntervalSinceNow > 0 {
+            let remaining = max(0, min(0.2, deadline.timeIntervalSinceNow))
+            CFRunLoopRunInMode(.defaultMode, remaining, false)
+        }
+    }
+
+    private func matchingInputSources(
         property: CFString?,
         value: CFTypeRef,
         includeAllInstalled: Bool
-    ) -> TISInputSource? {
-        guard let property else {
-            return nil
-        }
-
-        let filter = [property as String: value] as CFDictionary
+    ) -> [TISInputSource] {
+        let filter = property.map { [$0 as String: value] as CFDictionary }
         guard let unmanagedList = TISCreateInputSourceList(filter, includeAllInstalled) else {
-            return nil
+            return []
         }
 
         let list = unmanagedList.takeRetainedValue() as [AnyObject]
-        return list.first.flatMap { unsafeBitCast($0, to: TISInputSource?.self) }
+        return list.map { unsafeDowncast($0, to: TISInputSource.self) }
     }
 
     private func stringProperty(_ property: CFString?, for source: TISInputSource) -> String? {
@@ -145,6 +177,18 @@ final class LeftIOLauncher: NSObject, NSApplicationDelegate {
 
         return value as? String
     }
+
+    private func boolProperty(_ property: CFString?, for source: TISInputSource) -> Bool? {
+        guard let property,
+              let rawValue = TISGetInputSourceProperty(source, property) else {
+            return nil
+        }
+        let value = unsafeBitCast(rawValue, to: CFTypeRef.self)
+        guard CFGetTypeID(value) == CFBooleanGetTypeID() else {
+            return nil
+        }
+        return CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self))
+    }
 }
 
 private enum ActivationResult {
@@ -152,4 +196,6 @@ private enum ActivationResult {
     case alreadySelected
     case registeredButModeMissing
     case notRegistered
+    case duplicateSources
+    case enableFailed
 }

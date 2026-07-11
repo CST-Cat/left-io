@@ -1,10 +1,12 @@
 #include "CRimeBridge.h"
 
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef int RimeBool;
 typedef uintptr_t RimeSessionId;
@@ -299,12 +301,24 @@ typedef struct {
   RimeApi* api;
   int ref_count;
   int initialized;
+  char* shared_data_dir;
+  char* user_data_dir;
+  char* app_name;
+  char* distribution_version;
+  char* deployed_schema_file;
 } OneHandRimeRuntime;
 
 static OneHandRimeRuntime g_runtime = {0};
+static pthread_mutex_t g_runtime_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char g_last_error[512] = {0};
 
 #define RIME_STRUCT_INIT(Type, var) ((var).data_size = sizeof(Type) - sizeof((var).data_size))
+#define RIME_API_HAS(api, member)                                             \
+  ((api) != NULL &&                                                          \
+   (api)->data_size >=                                                       \
+       (int)(offsetof(RimeApi, member) + sizeof((api)->member) -             \
+             sizeof((api)->data_size)) &&                                    \
+   (api)->member != NULL)
 
 static void set_last_error(const char* message) {
   if (!message) {
@@ -318,12 +332,55 @@ static void set_last_errorf(const char* format, const char* detail) {
   snprintf(g_last_error, sizeof(g_last_error), format, detail ? detail : "");
 }
 
-static int api_has_change_page(const RimeApi* api) {
-  if (!api) {
-    return 0;
+static int require_api_member(const RimeApi* api,
+                              int available,
+                              const char* member_name) {
+  (void)api;
+  if (available) {
+    return 1;
   }
-  size_t required = offsetof(RimeApi, change_page) + sizeof(api->change_page);
-  return api->data_size >= (int)(required - sizeof(api->data_size)) && api->change_page != NULL;
+  set_last_errorf("loaded librime does not provide required API member: %s",
+                  member_name);
+  return 0;
+}
+
+static int validate_required_api(const RimeApi* api) {
+#define REQUIRE_RIME_API(member)                                              \
+  do {                                                                        \
+    if (!require_api_member(api, RIME_API_HAS(api, member), #member)) {       \
+      return 0;                                                               \
+    }                                                                         \
+  } while (0)
+
+  REQUIRE_RIME_API(setup);
+  REQUIRE_RIME_API(initialize);
+  REQUIRE_RIME_API(deployer_initialize);
+  REQUIRE_RIME_API(deploy_schema);
+  REQUIRE_RIME_API(create_session);
+  REQUIRE_RIME_API(find_session);
+  REQUIRE_RIME_API(destroy_session);
+  REQUIRE_RIME_API(commit_composition);
+  REQUIRE_RIME_API(clear_composition);
+  REQUIRE_RIME_API(get_commit);
+  REQUIRE_RIME_API(free_commit);
+  REQUIRE_RIME_API(get_context);
+  REQUIRE_RIME_API(free_context);
+  REQUIRE_RIME_API(get_status);
+  REQUIRE_RIME_API(free_status);
+  REQUIRE_RIME_API(set_option);
+  REQUIRE_RIME_API(get_current_schema);
+  REQUIRE_RIME_API(select_schema);
+  REQUIRE_RIME_API(get_input);
+  REQUIRE_RIME_API(select_candidate);
+  REQUIRE_RIME_API(select_candidate_on_current_page);
+  REQUIRE_RIME_API(candidate_list_begin);
+  REQUIRE_RIME_API(candidate_list_next);
+  REQUIRE_RIME_API(candidate_list_end);
+  REQUIRE_RIME_API(set_input);
+  REQUIRE_RIME_API(change_page);
+
+#undef REQUIRE_RIME_API
+  return 1;
 }
 
 static char* duplicate_string(const char* source) {
@@ -339,11 +396,58 @@ static char* duplicate_string(const char* source) {
   return copy;
 }
 
+static int strings_equal(const char* lhs, const char* rhs) {
+  if (!lhs || !rhs) {
+    return lhs == rhs;
+  }
+  return strcmp(lhs, rhs) == 0;
+}
+
+static void shutdown_runtime(void) {
+  if (g_runtime.initialized && RIME_API_HAS(g_runtime.api, finalize)) {
+    g_runtime.api->finalize();
+  }
+  if (g_runtime.dylib) {
+    dlclose(g_runtime.dylib);
+  }
+  free(g_runtime.shared_data_dir);
+  free(g_runtime.user_data_dir);
+  free(g_runtime.app_name);
+  free(g_runtime.distribution_version);
+  free(g_runtime.deployed_schema_file);
+  memset(&g_runtime, 0, sizeof(g_runtime));
+}
+
+static void shutdown_runtime_at_exit(void) {
+  pthread_mutex_lock(&g_runtime_mutex);
+  shutdown_runtime();
+  pthread_mutex_unlock(&g_runtime_mutex);
+}
+
 static int ensure_runtime_initialized(const char* shared_data_dir,
                                       const char* user_data_dir,
-                                      const char* app_name) {
+                                      const char* app_name,
+                                      const char* distribution_version) {
+  const char* resolved_app_name =
+      app_name && app_name[0] ? app_name : "rime.leftio";
+  const char* resolved_distribution_version =
+      distribution_version && distribution_version[0]
+          ? distribution_version
+          : "0.1.0";
   if (g_runtime.initialized) {
-    return 1;
+    if (strings_equal(g_runtime.shared_data_dir, shared_data_dir) &&
+        strings_equal(g_runtime.user_data_dir, user_data_dir) &&
+        strings_equal(g_runtime.app_name, resolved_app_name) &&
+        strings_equal(g_runtime.distribution_version,
+                      resolved_distribution_version)) {
+      return 1;
+    }
+    if (g_runtime.ref_count > 0) {
+      set_last_error(
+          "cannot switch rime data directories while sessions are active.");
+      return 0;
+    }
+    shutdown_runtime();
   }
 
   const char* env_path = getenv("LEFTIO_LIBRIME_PATH");
@@ -387,6 +491,26 @@ static int ensure_runtime_initialized(const char* shared_data_dir,
     dlclose(dylib);
     return 0;
   }
+  if (!validate_required_api(api)) {
+    dlclose(dylib);
+    return 0;
+  }
+
+  char* shared_data_dir_copy = duplicate_string(shared_data_dir);
+  char* user_data_dir_copy = duplicate_string(user_data_dir);
+  char* app_name_copy = duplicate_string(resolved_app_name);
+  char* distribution_version_copy =
+      duplicate_string(resolved_distribution_version);
+  if (!shared_data_dir_copy || !user_data_dir_copy || !app_name_copy ||
+      !distribution_version_copy) {
+    free(shared_data_dir_copy);
+    free(user_data_dir_copy);
+    free(app_name_copy);
+    free(distribution_version_copy);
+    set_last_error("failed to retain rime runtime paths.");
+    dlclose(dylib);
+    return 0;
+  }
 
   RimeTraits traits = {0};
   RIME_STRUCT_INIT(RimeTraits, traits);
@@ -394,35 +518,56 @@ static int ensure_runtime_initialized(const char* shared_data_dir,
   traits.user_data_dir = user_data_dir;
   traits.distribution_name = "LeftIO";
   traits.distribution_code_name = "leftio";
-  traits.distribution_version = "0.1.0";
-  traits.app_name = app_name && app_name[0] ? app_name : "rime.leftio";
+  traits.distribution_version = resolved_distribution_version;
+  traits.app_name = resolved_app_name;
   traits.min_log_level = 1;
 
-  api->setup(&traits);
-  api->initialize(NULL);
-  if (api->start_maintenance && api->start_maintenance(1) && api->join_maintenance_thread) {
-    api->join_maintenance_thread();
+  char prebuilt_data_dir[1024] = {0};
+  char prebuilt_default[1024] = {0};
+  int prebuilt_data_dir_length = snprintf(prebuilt_data_dir,
+                                          sizeof(prebuilt_data_dir),
+                                          "%s/build",
+                                          shared_data_dir);
+  int prebuilt_default_length = snprintf(prebuilt_default,
+                                         sizeof(prebuilt_default),
+                                         "%s/default.yaml",
+                                         prebuilt_data_dir);
+  int has_prebuilt_workspace =
+      prebuilt_data_dir_length >= 0 &&
+      (size_t)prebuilt_data_dir_length < sizeof(prebuilt_data_dir) &&
+      prebuilt_default_length >= 0 &&
+      (size_t)prebuilt_default_length < sizeof(prebuilt_default) &&
+      access(prebuilt_default, R_OK) == 0;
+  if (has_prebuilt_workspace) {
+    // Old releases deployed into user_data_dir/build. Resolve both the primary
+    // and fallback compiled resources directly from the immutable packaged
+    // workspace so stale or partially-written user build files can never
+    // override it. User dictionaries remain in user_data_dir and are
+    // unaffected.
+    traits.prebuilt_data_dir = prebuilt_data_dir;
+    traits.staging_dir = prebuilt_data_dir;
   }
+
+  api->setup(&traits);
+  api->initialize(&traits);
+  // deploy_schema() depends on the deployer module set. Loading those modules
+  // is cheap and does not run maintenance or write the staging directory.
+  api->deployer_initialize(&traits);
 
   g_runtime.dylib = dylib;
   g_runtime.api = api;
   g_runtime.initialized = 1;
+  g_runtime.shared_data_dir = shared_data_dir_copy;
+  g_runtime.user_data_dir = user_data_dir_copy;
+  g_runtime.app_name = app_name_copy;
+  g_runtime.distribution_version = distribution_version_copy;
+  static int registered_exit_cleanup = 0;
+  if (!registered_exit_cleanup) {
+    atexit(shutdown_runtime_at_exit);
+    registered_exit_cleanup = 1;
+  }
   set_last_error(NULL);
   return 1;
-}
-
-static void shutdown_runtime_if_idle(void) {
-  if (!g_runtime.initialized || g_runtime.ref_count > 0) {
-    return;
-  }
-
-  if (g_runtime.api) {
-    g_runtime.api->finalize();
-  }
-  if (g_runtime.dylib) {
-    dlclose(g_runtime.dylib);
-  }
-  memset(&g_runtime, 0, sizeof(g_runtime));
 }
 
 static int validate_handle(OneHandRimeBridgeHandle* handle) {
@@ -451,20 +596,88 @@ static int fetch_context(OneHandRimeBridgeHandle* handle, RimeContext* context) 
 }
 
 static int deploy_schema(const char* shared_data_dir, const char* schema_id) {
-  if (!g_runtime.api || !g_runtime.api->deploy_schema || !schema_id || !schema_id[0]) {
-    return 1;
+  if (!g_runtime.api || !schema_id || !schema_id[0]) {
+    set_last_error("rime schema deployment arguments are invalid.");
+    return 0;
   }
 
   char schema_file[1024] = {0};
+  int length = 0;
   if (shared_data_dir && shared_data_dir[0]) {
-    snprintf(schema_file, sizeof(schema_file), "%s/%s.schema.yaml", shared_data_dir, schema_id);
+    length = snprintf(schema_file,
+                      sizeof(schema_file),
+                      "%s/%s.schema.yaml",
+                      shared_data_dir,
+                      schema_id);
   } else {
-    snprintf(schema_file, sizeof(schema_file), "%s.schema.yaml", schema_id);
+    length = snprintf(schema_file, sizeof(schema_file), "%s.schema.yaml", schema_id);
+  }
+  if (length < 0 || (size_t)length >= sizeof(schema_file)) {
+    set_last_error("rime schema path is too long.");
+    return 0;
+  }
+  if (strings_equal(g_runtime.deployed_schema_file, schema_file)) {
+    return 1;
+  }
+
+  char prebuilt_schema[1024] = {0};
+  char prebuilt_prism[1024] = {0};
+  char prebuilt_table[1024] = {0};
+  int schema_length = snprintf(prebuilt_schema,
+                               sizeof(prebuilt_schema),
+                               "%s/build/%s.schema.yaml",
+                               shared_data_dir,
+                               schema_id);
+  int prism_length = snprintf(prebuilt_prism,
+                              sizeof(prebuilt_prism),
+                              "%s/build/%s.prism.bin",
+                              shared_data_dir,
+                              schema_id);
+  int table_length = snprintf(prebuilt_table,
+                              sizeof(prebuilt_table),
+                              "%s/build/%s.table.bin",
+                              shared_data_dir,
+                              schema_id);
+  int prebuilt_paths_fit =
+      schema_length >= 0 && (size_t)schema_length < sizeof(prebuilt_schema) &&
+      prism_length >= 0 && (size_t)prism_length < sizeof(prebuilt_prism) &&
+      table_length >= 0 && (size_t)table_length < sizeof(prebuilt_table);
+  int has_prebuilt_schema =
+      prebuilt_paths_fit && access(prebuilt_schema, R_OK) == 0 &&
+      access(prebuilt_prism, R_OK) == 0 && access(prebuilt_table, R_OK) == 0;
+
+  if (has_prebuilt_schema) {
+    // The immutable application bundle already contains a complete compiled
+    // workspace. Starting Rime maintenance here would write user_data/build
+    // while create_session() reads it, so a cold first session could observe a
+    // partially-written YAML file. Keep this path read-only and let Rime use
+    // shared_data_dir/build as the resolver's fallback root.
+    char* deployed_schema_file = duplicate_string(schema_file);
+    if (!deployed_schema_file) {
+      set_last_error("failed to retain prebuilt rime schema path.");
+      return 0;
+    }
+    free(g_runtime.deployed_schema_file);
+    g_runtime.deployed_schema_file = deployed_schema_file;
+    return 1;
+  }
+
+  if (!RIME_API_HAS(g_runtime.api, deploy_schema)) {
+    set_last_error("loaded librime cannot deploy schemas.");
+    return 0;
   }
   if (!g_runtime.api->deploy_schema(schema_file)) {
     set_last_errorf("failed to deploy rime schema: %s", schema_file);
     return 0;
   }
+
+  char* deployed_schema_file = duplicate_string(schema_file);
+  if (!deployed_schema_file) {
+    set_last_error("failed to retain deployed rime schema path.");
+    return 0;
+  }
+  free(g_runtime.deployed_schema_file);
+  g_runtime.deployed_schema_file = deployed_schema_file;
 
   return 1;
 }
@@ -472,7 +685,8 @@ static int deploy_schema(const char* shared_data_dir, const char* schema_id) {
 OneHandRimeBridgeHandle* OneHandRimeBridgeCreate(const char* shared_data_dir,
                                                  const char* user_data_dir,
                                                  const char* schema_id,
-                                                 const char* app_name) {
+                                                 const char* app_name,
+                                                 const char* distribution_version) {
   if (!shared_data_dir || !shared_data_dir[0]) {
     set_last_error("shared_data_dir is empty.");
     return NULL;
@@ -486,23 +700,31 @@ OneHandRimeBridgeHandle* OneHandRimeBridgeCreate(const char* shared_data_dir,
     return NULL;
   }
 
-  if (!ensure_runtime_initialized(shared_data_dir, user_data_dir, app_name)) {
+  pthread_mutex_lock(&g_runtime_mutex);
+  if (!ensure_runtime_initialized(shared_data_dir,
+                                  user_data_dir,
+                                  app_name,
+                                  distribution_version)) {
+    pthread_mutex_unlock(&g_runtime_mutex);
     return NULL;
   }
 
   if (!deploy_schema(shared_data_dir, schema_id)) {
+    pthread_mutex_unlock(&g_runtime_mutex);
     return NULL;
   }
 
   RimeSessionId session_id = g_runtime.api->create_session();
   if (!session_id) {
     set_last_error("failed to create rime session.");
+    pthread_mutex_unlock(&g_runtime_mutex);
     return NULL;
   }
 
   if (!g_runtime.api->select_schema(session_id, schema_id)) {
     g_runtime.api->destroy_session(session_id);
     set_last_errorf("failed to select rime schema: %s", schema_id);
+    pthread_mutex_unlock(&g_runtime_mutex);
     return NULL;
   }
 
@@ -510,12 +732,14 @@ OneHandRimeBridgeHandle* OneHandRimeBridgeCreate(const char* shared_data_dir,
   if (!handle) {
     g_runtime.api->destroy_session(session_id);
     set_last_error("failed to allocate rime bridge handle.");
+    pthread_mutex_unlock(&g_runtime_mutex);
     return NULL;
   }
 
   handle->session_id = session_id;
   g_runtime.ref_count += 1;
   set_last_error(NULL);
+  pthread_mutex_unlock(&g_runtime_mutex);
   return handle;
 }
 
@@ -523,6 +747,7 @@ void OneHandRimeBridgeDestroy(OneHandRimeBridgeHandle* handle) {
   if (!handle) {
     return;
   }
+  pthread_mutex_lock(&g_runtime_mutex);
   if (g_runtime.api && g_runtime.initialized && handle->session_id) {
     g_runtime.api->destroy_session(handle->session_id);
   }
@@ -530,7 +755,9 @@ void OneHandRimeBridgeDestroy(OneHandRimeBridgeHandle* handle) {
   if (g_runtime.ref_count > 0) {
     g_runtime.ref_count -= 1;
   }
-  shutdown_runtime_if_idle();
+  // Keep librime initialized while the input-method process lives. A new
+  // controller can now create a session without repeating deployment.
+  pthread_mutex_unlock(&g_runtime_mutex);
 }
 
 const char* OneHandRimeBridgeGetLastError(void) {
@@ -539,6 +766,10 @@ const char* OneHandRimeBridgeGetLastError(void) {
 
 bool OneHandRimeBridgeSetInput(OneHandRimeBridgeHandle* handle, const char* input) {
   if (!validate_handle(handle)) {
+    return false;
+  }
+  if (!RIME_API_HAS(g_runtime.api, set_input)) {
+    set_last_error("loaded librime cannot replace session input.");
     return false;
   }
   if (!g_runtime.api->set_input(handle->session_id, input ? input : "")) {
@@ -574,6 +805,10 @@ bool OneHandRimeBridgeSelectCandidateOnCurrentPage(OneHandRimeBridgeHandle* hand
   if (!validate_handle(handle)) {
     return false;
   }
+  if (!RIME_API_HAS(g_runtime.api, select_candidate_on_current_page)) {
+    set_last_error("loaded librime cannot select a page-relative candidate.");
+    return false;
+  }
   if (!g_runtime.api->select_candidate_on_current_page(handle->session_id, index)) {
     set_last_error("failed to select rime candidate.");
     return false;
@@ -585,6 +820,10 @@ bool OneHandRimeBridgeSelectCandidateOnCurrentPage(OneHandRimeBridgeHandle* hand
 bool OneHandRimeBridgeSelectCandidateAtIndex(OneHandRimeBridgeHandle* handle,
                                              size_t index) {
   if (!validate_handle(handle)) {
+    return false;
+  }
+  if (!RIME_API_HAS(g_runtime.api, select_candidate)) {
+    set_last_error("loaded librime cannot select an absolute candidate index.");
     return false;
   }
   if (!g_runtime.api->select_candidate(handle->session_id, index)) {
@@ -599,7 +838,7 @@ bool OneHandRimeBridgeChangePage(OneHandRimeBridgeHandle* handle, bool backward)
   if (!validate_handle(handle)) {
     return false;
   }
-  if (!api_has_change_page(g_runtime.api) ||
+  if (!RIME_API_HAS(g_runtime.api, change_page) ||
       !g_runtime.api->change_page(handle->session_id, backward ? 1 : 0)) {
     set_last_error("failed to change rime candidate page.");
     return false;
@@ -671,6 +910,10 @@ char* OneHandRimeBridgeCopyInput(OneHandRimeBridgeHandle* handle) {
   if (!validate_handle(handle)) {
     return NULL;
   }
+  if (!RIME_API_HAS(g_runtime.api, get_input)) {
+    set_last_error("loaded librime cannot read session input.");
+    return NULL;
+  }
   const char* input = g_runtime.api->get_input(handle->session_id);
   return duplicate_string(input);
 }
@@ -708,7 +951,8 @@ char* OneHandRimeBridgeCopyCandidateAtIndex(OneHandRimeBridgeHandle* handle,
   }
 
   char* text = NULL;
-  if ((int)index < context.menu.num_candidates) {
+  if (context.menu.num_candidates > 0 &&
+      index < (size_t)context.menu.num_candidates) {
     text = duplicate_string(context.menu.candidates[index].text);
   }
   g_runtime.api->free_context(&context);
@@ -722,9 +966,9 @@ char* OneHandRimeBridgeCopyCandidateListAtIndex(OneHandRimeBridgeHandle* handle,
   }
 
   RimeCandidateListIterator iterator = {0};
-  if (!g_runtime.api->candidate_list_begin ||
-      !g_runtime.api->candidate_list_next ||
-      !g_runtime.api->candidate_list_end ||
+  if (!RIME_API_HAS(g_runtime.api, candidate_list_begin) ||
+      !RIME_API_HAS(g_runtime.api, candidate_list_next) ||
+      !RIME_API_HAS(g_runtime.api, candidate_list_end) ||
       !g_runtime.api->candidate_list_begin(handle->session_id, &iterator)) {
     return NULL;
   }

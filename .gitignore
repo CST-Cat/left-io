@@ -5,6 +5,7 @@
 DerivedData/
 *.xcresult
 /vendor/
+/installation.yaml
 
 # Apple/Xcode signing credentials and local export artifacts.
 *.p12

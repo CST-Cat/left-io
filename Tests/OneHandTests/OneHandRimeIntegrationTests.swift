@@ -19,7 +19,6 @@ final class OneHandRimeIntegrationTests: XCTestCase {
             currentDirectoryPath: repositoryRoot.path,
             applicationSupportDirectory: applicationSupportDirectory
         )
-
         bridge = try LiveOneHandRimeBridge(
             sharedDataDirectory: layout.sharedDataDirectory,
             userDataDirectory: layout.userDataDirectory,
@@ -37,6 +36,23 @@ final class OneHandRimeIntegrationTests: XCTestCase {
             candidates.contains("你"),
             "Expected baseline luna_pinyin candidate '你', got \(candidates)"
         )
+
+        bridge = nil
+        let reusedRuntimeStart = Date()
+        bridge = try LiveOneHandRimeBridge(
+            sharedDataDirectory: layout.sharedDataDirectory,
+            userDataDirectory: layout.userDataDirectory,
+            schemaId: "luna_pinyin",
+            appName: "rime.leftio.tests"
+        )
+        let reusedRuntimeDuration = Date().timeIntervalSince(reusedRuntimeStart)
+
+        XCTAssertLessThan(
+            reusedRuntimeDuration,
+            1.0,
+            "A second controller should reuse the deployed in-process Rime runtime."
+        )
+        XCTAssertTrue(try XCTUnwrap(bridge).setInput("hao"))
     }
 
     func testVendoredLibrimeFindsAndCommitsSeedCandidate() throws {

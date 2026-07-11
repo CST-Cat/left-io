@@ -2,6 +2,21 @@ import XCTest
 @testable import OneHand
 
 final class OneHandStateMachineTests: XCTestCase {
+    func testQFunctionKeyTypesResolveFromContext() {
+        XCTAssertEqual(
+            OneHandQFunctionKeyType.resolve(isSymbolLayerActive: false, context: .init()),
+            .enterSymbolLayer
+        )
+        XCTAssertEqual(
+            OneHandQFunctionKeyType.resolve(isSymbolLayerActive: false, context: .init(isComposing: true)),
+            .insertSyllableDelimiter
+        )
+        XCTAssertEqual(
+            OneHandQFunctionKeyType.resolve(isSymbolLayerActive: true, context: .init(isComposing: true)),
+            .exitSymbolLayer
+        )
+    }
+
     func testQEntersSymbolLayerWhenNotComposing() {
         var machine = OneHandStateMachine()
 

@@ -17,10 +17,23 @@ public struct OneHandLexicon: Sendable {
         case invalidEncoding
     }
 
-    private let entries: [OneHandLexiconEntry]
+    private let entriesByFirstCode: [Character: [OneHandLexiconEntry]]
+    private let entriesByFirstTwoCodes: [String: [OneHandLexiconEntry]]
 
     public init(entries: [OneHandLexiconEntry]) {
-        self.entries = entries
+        let rankedEntries = entries.sorted(by: Self.ranksBefore)
+        self.entriesByFirstCode = Dictionary(
+            grouping: rankedEntries.compactMap { entry in
+                entry.code.first.map { ($0, entry) }
+            },
+            by: \.0
+        ).mapValues { pairs in
+            pairs.map(\.1)
+        }
+        self.entriesByFirstTwoCodes = Dictionary(
+            grouping: rankedEntries.filter { !$0.code.isEmpty },
+            by: { String($0.code.prefix(2)) }
+        )
     }
 
     public func candidates(matching code: String) -> [OneHandLexiconEntry] {
@@ -28,22 +41,35 @@ public struct OneHandLexicon: Sendable {
             return []
         }
 
-        return entries
-            .filter { $0.code.hasPrefix(code) }
-            .sorted(by: { lhs, rhs in
-                let lhsIsExact = lhs.code == code
-                let rhsIsExact = rhs.code == code
-                if lhsIsExact != rhsIsExact {
-                    return lhsIsExact
-                }
-                if lhs.weight != rhs.weight {
-                    return lhs.weight > rhs.weight
-                }
-                if lhs.code.count != rhs.code.count {
-                    return lhs.code.count < rhs.code.count
-                }
-                return lhs.text < rhs.text
-            })
+        let bucket: [OneHandLexiconEntry]
+        if code.count >= 2 {
+            bucket = entriesByFirstTwoCodes[String(code.prefix(2))] ?? []
+        } else if let firstCode = code.first {
+            bucket = entriesByFirstCode[firstCode] ?? []
+        } else {
+            bucket = []
+        }
+
+        var exactMatches: [OneHandLexiconEntry] = []
+        var prefixMatches: [OneHandLexiconEntry] = []
+        for entry in bucket where entry.code.hasPrefix(code) {
+            if entry.code == code {
+                exactMatches.append(entry)
+            } else {
+                prefixMatches.append(entry)
+            }
+        }
+        return exactMatches + prefixMatches
+    }
+
+    private static func ranksBefore(_ lhs: OneHandLexiconEntry, _ rhs: OneHandLexiconEntry) -> Bool {
+        if lhs.weight != rhs.weight {
+            return lhs.weight > rhs.weight
+        }
+        if lhs.code.count != rhs.code.count {
+            return lhs.code.count < rhs.code.count
+        }
+        return lhs.text < rhs.text
     }
 
     public static func parse(rimeDictionary contents: String) -> OneHandLexicon {

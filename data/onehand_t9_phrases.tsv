@@ -1,0 +1,3 @@
+# Phrase readings absent from luna_pinyin.dict.yaml must be explicit here.
+# Never infer a polyphonic phrase from a character's most common reading.
+大家好	da jia hao

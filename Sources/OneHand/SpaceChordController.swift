@@ -7,6 +7,10 @@ public struct SpaceChordController: Equatable, Sendable {
     public init() {}
 
     public mutating func begin() {
+        guard !isHoldingSpace else {
+            return
+        }
+
         isHoldingSpace = true
         didUseChord = false
     }

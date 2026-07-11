@@ -14,7 +14,6 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
     }
 
     private enum InstallResult {
-        case activated
         case registered
         case copiedButNotRegistered
         case failed(String)
@@ -86,6 +85,7 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
 
     private func startInputMethodServer() {
         let bundle = Bundle.main
+        LeftIOInputController.prewarmSessionBackend()
         let connectionName = bundle.object(forInfoDictionaryKey: "InputMethodConnectionName") as? String
         let startupMessage = "starting input method server bundle=\(bundle.bundleIdentifier ?? "-") connection=\(connectionName ?? "-") home=\(NSHomeDirectory()) args=\(CommandLine.arguments)"
         writeServerLog(startupMessage)
@@ -107,25 +107,132 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
         let fileManager = FileManager.default
         let sourceURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
         let targetURL = Self.userInstalledBundleURL()
+        let systemInstalledURL = URL(
+            fileURLWithPath: "/Library/Input Methods/LeftIO.app",
+            isDirectory: true
+        )
+        if fileManager.fileExists(atPath: systemInstalledURL.path) {
+            return .failed(
+                "已存在系统级 LeftIO：\(systemInstalledURL.path)。请先移除或更新该副本，不要再创建重复的用户输入源。"
+            )
+        }
+        let transactionURL = (fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? targetURL.deletingLastPathComponent())
+            .appendingPathComponent("LeftIO/InstallTransactions/\(UUID().uuidString)", isDirectory: true)
+        let stagingURL = transactionURL.appendingPathComponent("staged.app", isDirectory: true)
+        var previousBundleWasSwapped = false
+        var removeTransactionOnExit = true
+
+        defer {
+            if removeTransactionOnExit {
+                try? fileManager.removeItem(at: transactionURL)
+            }
+        }
 
         do {
             try fileManager.createDirectory(
                 at: targetURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-
-            if fileManager.fileExists(atPath: targetURL.path) {
-                try fileManager.removeItem(at: targetURL)
-            }
-
-            try fileManager.copyItem(at: sourceURL, to: targetURL)
+            try fileManager.createDirectory(
+                at: transactionURL,
+                withIntermediateDirectories: true
+            )
+            try fileManager.copyItem(at: sourceURL, to: stagingURL)
+            try Self.runTool("/usr/bin/xattr", arguments: ["-cr", stagingURL.path])
+            try Self.ensureNoUnsafeExtendedAttributes(at: stagingURL)
+            try Self.runTool(
+                "/usr/bin/codesign",
+                arguments: ["--verify", "--deep", "--strict", stagingURL.path]
+            )
+            previousBundleWasSwapped = try Self.activateStagedBundle(
+                stagingURL,
+                at: targetURL,
+                fileManager: fileManager
+            )
         } catch {
             return .failed("复制到 ~/Library/Input Methods 失败：\(error.localizedDescription)")
         }
 
-        let registrationScheduled = scheduleInstalledRegistrationHelper(at: targetURL)
-        guard registrationScheduled else {
+        do {
+            try Self.ensureNoUnsafeExtendedAttributes(at: targetURL)
+            try Self.runTool(
+                "/usr/bin/codesign",
+                arguments: ["--verify", "--deep", "--strict", targetURL.path]
+            )
+        } catch {
+            if previousBundleWasSwapped {
+                if Self.swapBundles(stagingURL, targetURL) {
+                    return .failed("最终完整性检查失败，已恢复之前安装的 LeftIO：\(error.localizedDescription)")
+                }
+                removeTransactionOnExit = false
+                return .failed(
+                    "最终完整性检查失败，且无法自动回滚。之前的安装已保留在 \(stagingURL.path)：\(error.localizedDescription)"
+                )
+            }
+            do {
+                try fileManager.removeItem(at: targetURL)
+            } catch let removalError {
+                return .failed(
+                    "最终完整性检查失败，且无法移除无效副本 \(targetURL.path)：\(removalError.localizedDescription)"
+                )
+            }
+            return .failed("最终完整性检查失败，已移除无效副本：\(error.localizedDescription)")
+        }
+
+        guard runInstalledRegistrationHelper(at: targetURL) else {
+            if previousBundleWasSwapped {
+                if Self.swapBundles(stagingURL, targetURL) {
+                    if runInstalledRegistrationHelper(at: targetURL) {
+                        return .failed("系统注册失败，已恢复并重新验证之前安装的 LeftIO。")
+                    }
+                    return .failed(
+                        "系统注册失败；之前的 LeftIO 文件已恢复，但其 TIS 注册也无法重新验证。"
+                    )
+                }
+                removeTransactionOnExit = false
+                return .failed(
+                    "系统注册失败，且无法自动回滚。之前的安装已保留在 \(stagingURL.path)，未被删除。"
+                )
+            }
             return .copiedButNotRegistered
+        }
+
+        do {
+            try Self.normalizeRuntimeAddedAttributes(at: targetURL)
+        } catch {
+            if previousBundleWasSwapped {
+                if Self.swapBundles(stagingURL, targetURL) {
+                    guard runInstalledRegistrationHelper(at: targetURL) else {
+                        return .failed(
+                            "注册后完整性检查失败；之前的 LeftIO 文件已恢复，但其 TIS 注册无法重新验证：\(error.localizedDescription)"
+                        )
+                    }
+                    do {
+                        try Self.normalizeRuntimeAddedAttributes(at: targetURL)
+                        return .failed(
+                            "注册后完整性检查失败，已恢复并重新验证之前安装的 LeftIO：\(error.localizedDescription)"
+                        )
+                    } catch let restoreError {
+                        return .failed(
+                            "注册后完整性检查失败；之前的 LeftIO 已恢复，但其完整性验证也失败：\(restoreError.localizedDescription)"
+                        )
+                    }
+                }
+                removeTransactionOnExit = false
+                return .failed(
+                    "注册后完整性检查失败，且无法自动回滚。之前的安装已保留在 \(stagingURL.path)：\(error.localizedDescription)"
+                )
+            }
+
+            do {
+                try fileManager.removeItem(at: targetURL)
+            } catch let removalError {
+                return .failed(
+                    "注册后完整性检查失败，且无法移除无效副本 \(targetURL.path)：\(removalError.localizedDescription)"
+                )
+            }
+            return .failed("注册后完整性检查失败，已移除无效副本：\(error.localizedDescription)")
         }
 
         return .registered
@@ -136,9 +243,6 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "好")
 
         switch result {
-        case .activated:
-            alert.messageText = "LeftIO 已就绪"
-            alert.informativeText = "LeftIO 已复制到 ~/Library/Input Methods，并且已经向系统注册。请到“系统设置 > 键盘 > 文本输入”手动添加；如果列表没有刷新，请注销后重新登录。"
         case .registered:
             alert.messageText = "LeftIO 已注册"
             alert.informativeText = "LeftIO 已复制到 ~/Library/Input Methods，并且已经向系统注册。请到“系统设置 > 键盘 > 文本输入”手动添加；如果列表没有刷新，请注销后重新登录。"
@@ -173,22 +277,124 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
             .appendingPathComponent("LeftIO.app", isDirectory: true)
     }
 
-    private func scheduleInstalledRegistrationHelper(at bundleURL: URL) -> Bool {
+    private static func activateStagedBundle(
+        _ stagingURL: URL,
+        at targetURL: URL,
+        fileManager: FileManager
+    ) throws -> Bool {
+        guard fileManager.fileExists(atPath: targetURL.path) else {
+            try fileManager.moveItem(at: stagingURL, to: targetURL)
+            return false
+        }
+
+        guard swapBundles(stagingURL, targetURL) else {
+            let errorCode = errno
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errorCode),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errorCode))]
+            )
+        }
+        return true
+    }
+
+    private static func swapBundles(_ firstURL: URL, _ secondURL: URL) -> Bool {
+        firstURL.path.withCString { firstPath in
+            secondURL.path.withCString { secondPath in
+                renamex_np(firstPath, secondPath, UInt32(RENAME_SWAP)) == 0
+            }
+        }
+    }
+
+    private static func runTool(_ executablePath: String, arguments: [String]) throws {
+        let process = Process()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardError = errorPipe
+        try process.run()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let errorText = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackMessage = "\(executablePath) 失败，退出码 \(process.terminationStatus)"
+            throw NSError(
+                domain: "io.github.cstcat.inputmethod.leftio.install",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: errorText.flatMap { $0.isEmpty ? nil : $0 }
+                        ?? fallbackMessage
+                ]
+            )
+        }
+    }
+
+    private static func normalizeRuntimeAddedAttributes(at url: URL) throws {
+        for attribute in ["com.apple.quarantine", "com.apple.macl"] {
+            try runTool(
+                "/usr/bin/xattr",
+                arguments: ["-dr", attribute, url.path]
+            )
+        }
+        try ensureNoUnsafeExtendedAttributes(at: url)
+        try runTool(
+            "/usr/bin/codesign",
+            arguments: ["--verify", "--deep", "--strict", url.path]
+        )
+    }
+
+    private static func ensureNoUnsafeExtendedAttributes(at url: URL) throws {
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        process.arguments = ["-lr", url.path]
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        try process.run()
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(decoding: outputData, as: UTF8.self)
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "io.github.cstcat.inputmethod.leftio.install",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: output.isEmpty
+                        ? "无法检查暂存应用的扩展属性"
+                        : output.trimmingCharacters(in: .whitespacesAndNewlines)
+                ]
+            )
+        }
+
+        for attribute in ["com.apple.quarantine", "com.apple.macl"] {
+            if output.contains(": \(attribute):") {
+                throw NSError(
+                    domain: "io.github.cstcat.inputmethod.leftio.install",
+                    code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "暂存应用仍包含不安全的扩展属性 \(attribute)"
+                    ]
+                )
+            }
+        }
+    }
+
+    private func runInstalledRegistrationHelper(at bundleURL: URL) -> Bool {
         let executableURL = bundleURL
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("MacOS", isDirectory: true)
             .appendingPathComponent("LeftIO")
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [
-            "-c",
-            "sleep 1; exec '\(executableURL.path)' \(Self.registerArgument)"
-        ]
+        process.executableURL = executableURL
+        process.arguments = [Self.registerArgument]
 
         do {
             try process.run()
-            return true
+            process.waitUntilExit()
+            return process.terminationStatus == 0
         } catch {
             return false
         }
@@ -246,27 +452,67 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
             return false
         }
 
+        let allSources = inputSources(
+            property: nil,
+            value: kCFNull,
+            includeAllInstalled: true
+        )
+        let parentSources = inputMethodSources.filter { source in
+            stringProperty(kTISPropertyInputSourceID, for: source) == bundleIdentifier as String
+        }
+        let modeSources = allSources.filter { source in
+            stringProperty(kTISPropertyInputSourceID, for: source) == inputModeIdentifier as String
+                || stringProperty(kTISPropertyInputModeID, for: source) == inputModeIdentifier as String
+        }
+        guard parentSources.count == 1, modeSources.count == 1 else {
+            writeLog(
+                "register helper failed: expected one parent and mode, got parent=\(parentSources.count) mode=\(modeSources.count)"
+            )
+            return false
+        }
+
+        var enableSucceeded = true
         for source in inputMethodSources {
             let enableStatus = TISEnableInputSource(source)
             writeLog("register helper enable bundle source status=\(enableStatus) \(describeInputSource(source))")
+            enableSucceeded = enableSucceeded && enableStatus == noErr
         }
-
-        guard let inputMode = firstInputSource(
-            property: kTISPropertyInputSourceID,
-            value: inputModeIdentifier,
-            includeAllInstalled: true
-        ) ?? firstInputSource(
-            property: kTISPropertyInputModeID,
-            value: inputModeIdentifier,
-            includeAllInstalled: true
-        ) else {
-            writeLog("register helper failed: mode not found")
+        guard enableSucceeded else {
+            writeLog("register helper failed: one or more bundle sources could not be enabled")
             return false
         }
+
+        let inputMode = modeSources[0]
 
         let enableModeStatus = TISEnableInputSource(inputMode)
         drainRunLoop(for: 1.5)
         writeLog("register helper mode enable status=\(enableModeStatus)")
+        guard enableModeStatus == noErr else {
+            writeLog("register helper failed: mode enable status=\(enableModeStatus)")
+            return false
+        }
+
+        let verifiedBundleEnabled = boolProperty(
+            kTISPropertyInputSourceIsEnabled,
+            for: parentSources[0]
+        ) == true
+        let verifiedModeEnabled = boolProperty(
+            kTISPropertyInputSourceIsEnabled,
+            for: inputMode
+        ) == true
+        let verifiedModeSelectCapable = boolProperty(
+            kTISPropertyInputSourceIsSelectCapable,
+            for: inputMode
+        ) == true
+        guard verifiedBundleEnabled,
+              verifiedModeEnabled,
+              verifiedModeSelectCapable else {
+            writeLog(
+                "register helper failed final verification bundleEnabled=\(verifiedBundleEnabled) modeEnabled=\(verifiedModeEnabled) modeSelectCapable=\(verifiedModeSelectCapable)"
+            )
+            return false
+        }
+
         writeLog("register helper succeeded without selecting current input source")
         logInputSourceDiagnostics(stage: "after-enable", writeLog)
         return true
@@ -332,12 +578,13 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
     }
 
     private static func logURLs(named fileName: String) -> [URL] {
-        [
-            URL(
-                fileURLWithPath: ("~/Library/Input Methods" as NSString).expandingTildeInPath,
-                isDirectory: true
-            ).appendingPathComponent(fileName, isDirectory: false),
-            URL(fileURLWithPath: "/Users/Shared", isDirectory: true)
+        let rootDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        return [
+            rootDirectory
+                .appendingPathComponent("LeftIO", isDirectory: true)
                 .appendingPathComponent(fileName, isDirectory: false)
         ]
     }
@@ -439,6 +686,22 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
         }
 
         return value as? String
+    }
+
+    private static func boolProperty(
+        _ property: CFString?,
+        for source: TISInputSource
+    ) -> Bool? {
+        guard let property,
+              let rawValue = TISGetInputSourceProperty(source, property) else {
+            return nil
+        }
+
+        let value = unsafeBitCast(rawValue, to: CFTypeRef.self)
+        guard CFGetTypeID(value) == CFBooleanGetTypeID() else {
+            return nil
+        }
+        return CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self))
     }
 
     private static func valueDescription(
