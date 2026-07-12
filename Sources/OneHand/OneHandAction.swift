@@ -3,6 +3,8 @@ import Foundation
 public enum OneHandAction: Equatable, Sendable {
     case enterSymbolLayer
     case exitSymbolLayer
+    case enterNumericLayer
+    case exitNumericLayer
     case insertSyllableDelimiter
     case inputT9Code(String)
     case inputDigit(Int)
@@ -15,6 +17,6 @@ public enum OneHandAction: Equatable, Sendable {
     case commitComposition
     case insertSpace
     case insertNewline
-    case cancelPendingSpace
+    case cancelPendingQPress
     case cancelComposition
 }

@@ -58,13 +58,20 @@ int main(int argc, char** argv) {
   struct timespec start = {0};
   struct timespec end = {0};
   clock_gettime(CLOCK_MONOTONIC, &start);
+  char app_name[] = "rime.leftio.prebuilt-test";
   OneHandRimeBridgeHandle* handle = OneHandRimeBridgeCreate(
-      argv[2], argv[3], "onehand_t9", "rime.leftio.prebuilt-test", "0.1.0");
+      argv[2], argv[3], "onehand_t9", app_name, "0.1.0");
   clock_gettime(CLOCK_MONOTONIC, &end);
   if (!handle) {
     fprintf(stderr, "prebuilt Rime session failed: %s\n", OneHandRimeBridgeGetLastError());
     return 1;
   }
+
+  // The bridge contract allows caller-owned strings. librime/glog retains
+  // app_name after setup, so the bridge must give it process-lifetime storage
+  // rather than the Swift withCString buffer used by production callers.
+  memset(app_name, 'x', sizeof(app_name) - 1);
+  app_name[sizeof(app_name) - 1] = '\0';
 
   double startup = elapsed_seconds(start, end);
   if (startup >= 2.0) {

@@ -95,7 +95,7 @@ verify_app() {
     fail "expected bundle id $EXPECTED_BUNDLE_ID, got $bundle_id"
   [[ "$mode_id" == "$EXPECTED_MODE_ID" ]] ||
     fail "expected mode id $EXPECTED_MODE_ID, got $mode_id"
-  [[ "$connection_name" == "${EXPECTED_BUNDLE_ID}_Connection" ]] ||
+  [[ "$connection_name" == "LeftIO_Connection" ]] ||
     fail "unexpected input method connection $connection_name"
   [[ "$minimum_version" == "$EXPECTED_MIN_SYSTEM_VERSION" ]] ||
     fail "expected macOS $EXPECTED_MIN_SYSTEM_VERSION minimum, got $minimum_version"

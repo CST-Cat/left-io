@@ -5,6 +5,7 @@ public enum OneHandConfigurationLoader {
         case invalidTopLevelKey(String)
         case invalidSymbolKey(String)
         case invalidSymbolAction(String)
+        case invalidInputLayer(String)
         case invalidBoolean(String)
         case malformedSymbolLine(String)
     }
@@ -17,6 +18,8 @@ public enum OneHandConfigurationLoader {
     public static func parse(yaml: String) throws -> OneHandConfiguration {
         var symbols = OneHandConfiguration.defaultSymbols
         var autoReturn = true
+        var qTapLayer: OneHandInputLayer = .symbol
+        var qLongPressLayer: OneHandInputLayer = .numeric
         var inSymbolsSection = false
 
         for rawLine in yaml.split(whereSeparator: \.isNewline) {
@@ -42,6 +45,18 @@ public enum OneHandConfigurationLoader {
                     autoReturn = parsed
                     continue
                 }
+                if trimmed.hasPrefix("q_tap_layer:") {
+                    let value = trimmed.dropFirst("q_tap_layer:".count)
+                        .trimmingCharacters(in: .whitespaces)
+                    qTapLayer = try parseInputLayer(value)
+                    continue
+                }
+                if trimmed.hasPrefix("q_long_press_layer:") {
+                    let value = trimmed.dropFirst("q_long_press_layer:".count)
+                        .trimmingCharacters(in: .whitespaces)
+                    qLongPressLayer = try parseInputLayer(value)
+                    continue
+                }
                 throw Error.invalidTopLevelKey(trimmed)
             }
 
@@ -63,7 +78,19 @@ public enum OneHandConfigurationLoader {
             symbols[key] = try parseSymbolEntry(rawValue)
         }
 
-        return OneHandConfiguration(symbols: symbols, symbolLayerAutoReturns: autoReturn)
+        return OneHandConfiguration(
+            symbols: symbols,
+            symbolLayerAutoReturns: autoReturn,
+            qTapLayer: qTapLayer,
+            qLongPressLayer: qLongPressLayer
+        )
+    }
+
+    private static func parseInputLayer(_ value: String) throws -> OneHandInputLayer {
+        guard let layer = OneHandInputLayer(rawValue: value.lowercased()) else {
+            throw Error.invalidInputLayer(value)
+        }
+        return layer
     }
 
     private static func parseBoolean(_ value: String) -> Bool? {

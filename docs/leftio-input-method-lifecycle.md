@@ -7,7 +7,9 @@ This document defines the intended local install flow for LeftIO.
 - Prefer user-level development installs at `~/Library/Input Methods/LeftIO.app`.
 - Use TIS APIs for registration and enablement.
 - Do not write `com.apple.HIToolbox` or `com.apple.inputsources` directly.
-- Do not switch the current input source during install.
+- Leave the current input source alone during normal installs. When replacing a
+  currently selected LeftIO endpoint, temporarily select an enabled ASCII
+  fallback and restore LeftIO only after the replacement endpoint is running.
 - Stage, signature-check, and atomically activate a new bundle; retain the old
   bundle until TIS verification succeeds.
 - Treat log out / log in as the stable cache refresh boundary for first installs and stale input source lists.
@@ -65,8 +67,10 @@ The script:
 4. Moves the previous bundle to a backup and transactionally activates the staged app.
 5. Runs the installed app synchronously with `--register-installed-input-source`.
 6. Clears any quarantine or `macl` metadata that macOS attached while starting
-   that signed helper, then performs the final strict verification.
-7. Verifies the parent and mode sources are unique, enabled, and mode-select-capable.
+   that signed helper, rechecking the result because attachment can be delayed,
+   then performs the final strict verification.
+7. Verifies the parent and mode sources are unique, enabled, mode-select-capable,
+   and each present exactly once in the persistent third-party source list.
 8. Deletes the backup only after verification; otherwise restores it and re-registers the previous bundle.
 
 `com.apple.quarantine` and `com.apple.macl` are hard failures. Current macOS releases may retain the
@@ -75,21 +79,27 @@ removal, so provenance is reported as a warning rather than used as a false
 success/failure signal.
 
 The CLI installer, the DMG self-install flow, and the system-level installer all
-repeat that normalization after the signed registration helper exits, because
-macOS can attach `macl` while launching the otherwise-clean staged bundle.
+repeat that normalization after the signed registration helper exits and retry
+the inspect/remove cycle up to four times, because macOS can attach `macl` just
+after launching the otherwise-clean staged bundle.
 
 If `/Library/Input Methods/LeftIO.app` already exists, the user installer stops
 instead of creating a second physical bundle with the same TIS identifiers.
 Remove or update the system copy first.
 
-The helper only calls:
+The registration helper only calls:
 
 ```text
 TISRegisterInputSource
 TISEnableInputSource
 ```
 
-It does not call `TISSelectInputSource`.
+It does not call `TISSelectInputSource`. The user-level transaction has a
+separate, narrowly-scoped session helper: it calls `TISSelectInputSource` only
+when LeftIO was already selected at transaction start, first to select an ASCII
+fallback and then to restore LeftIO after the new endpoint launches. If WeType,
+ABC, or any other source is selected, the transaction neither switches it nor
+restores a sampled value afterward.
 
 After installing, add `LeftIO 单手九宫格` manually in System Settings. If it does not appear, log out of macOS and log back in.
 

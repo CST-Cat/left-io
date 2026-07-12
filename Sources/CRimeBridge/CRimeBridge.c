@@ -514,12 +514,16 @@ static int ensure_runtime_initialized(const char* shared_data_dir,
 
   RimeTraits traits = {0};
   RIME_STRUCT_INIT(RimeTraits, traits);
-  traits.shared_data_dir = shared_data_dir;
-  traits.user_data_dir = user_data_dir;
+  // librime copies most trait values into its deployer, but glog retains the
+  // app_name pointer passed to InitGoogleLogging(). Swift callers provide
+  // these arguments through withCString, so every trait pointer must refer to
+  // storage owned by the process-wide runtime before setup() is called.
+  traits.shared_data_dir = shared_data_dir_copy;
+  traits.user_data_dir = user_data_dir_copy;
   traits.distribution_name = "LeftIO";
   traits.distribution_code_name = "leftio";
-  traits.distribution_version = resolved_distribution_version;
-  traits.app_name = resolved_app_name;
+  traits.distribution_version = distribution_version_copy;
+  traits.app_name = app_name_copy;
   traits.min_log_level = 1;
 
   char prebuilt_data_dir[1024] = {0};

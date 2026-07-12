@@ -53,7 +53,11 @@ public final class OneHandLexiconSession: OneHandSession {
 
     public func apply(_ action: OneHandAction) {
         switch action {
-        case .enterSymbolLayer, .exitSymbolLayer, .cancelPendingSpace:
+        case .enterSymbolLayer,
+             .exitSymbolLayer,
+             .enterNumericLayer,
+             .exitNumericLayer,
+             .cancelPendingQPress:
             break
         case .cancelComposition:
             compositionText.removeAll()

@@ -64,7 +64,21 @@ verify_bundle() {
 
 clear_runtime_added_attributes() {
   local app="$1"
-  local cleanup_command="xattr -dr com.apple.quarantine $(shell_quote "$app") 2>/dev/null || true; xattr -dr com.apple.macl $(shell_quote "$app") 2>/dev/null || true"
+  local quoted_app
+  local cleanup_command
+  quoted_app="$(shell_quote "$app")"
+  cleanup_command="set -euo pipefail
+for attempt in 1 2 3 4; do
+  xattr -dr com.apple.quarantine $quoted_app 2>/dev/null || true
+  xattr -dr com.apple.macl $quoted_app 2>/dev/null || true
+  attributes=\$(xattr -lr $quoted_app 2>&1)
+  if ! grep -Eq 'com\\.apple\\.(quarantine|macl)' <<<\"\$attributes\"; then
+    exit 0
+  fi
+  sleep 0.2
+done
+echo 'Unable to clear quarantine or macl metadata from $app.' >&2
+exit 1"
 
   if [[ "$app" == "$TARGET_APP" ]]; then
     run_as_administrator "$cleanup_command"

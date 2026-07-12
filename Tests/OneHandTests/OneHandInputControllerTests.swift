@@ -12,27 +12,43 @@ final class OneHandInputControllerTests: XCTestCase {
         XCTAssertEqual(session.appliedActions, [.inputT9Code("2")])
     }
 
-    func testUsesCurrentSessionContextForSpaceRelease() {
+    func testSpaceUsesCurrentSessionContextOnKeyDown() {
         let session = OneHandRecordingSession(context: .init(hasCandidates: true))
         let controller = OneHandInputController(session: session)
 
-        XCTAssertEqual(controller.handle(.init(key: .space, phase: .down)), .init(actions: [], isConsumed: true))
+        XCTAssertEqual(
+            controller.handle(.init(key: .space, phase: .down)),
+            .init(actions: [.commitFirstCandidate], isConsumed: true)
+        )
         session.context.hasCandidates = false
 
-        XCTAssertEqual(controller.handle(.init(key: .space, phase: .up)), .init(actions: [.insertSpace], isConsumed: true))
-        XCTAssertEqual(session.appliedActions, [.insertSpace])
+        XCTAssertEqual(controller.handle(.init(key: .space, phase: .up)), .init(actions: [], isConsumed: true))
+        XCTAssertEqual(session.appliedActions, [.commitFirstCandidate])
     }
 
-    func testSpaceReleaseUsesComposingStateEvenWithoutCandidates() {
+    func testSpaceKeyDownUsesComposingStateEvenWithoutCandidates() {
         let session = OneHandRecordingSession(context: .init(isComposing: true))
         let controller = OneHandInputController(session: session)
 
-        XCTAssertEqual(controller.handle(.init(key: .space, phase: .down)), .init(actions: [], isConsumed: true))
         XCTAssertEqual(
-            controller.handle(.init(key: .space, phase: .up)),
+            controller.handle(.init(key: .space, phase: .down)),
             .init(actions: [.commitFirstCandidate], isConsumed: true)
         )
+        XCTAssertEqual(controller.handle(.init(key: .space, phase: .up)), .init(actions: [], isConsumed: true))
         XCTAssertEqual(session.appliedActions, [.commitFirstCandidate])
+    }
+
+    func testLongPressTriggerActionsFlowThroughSession() {
+        let session = OneHandRecordingSession()
+        let controller = OneHandInputController(session: session)
+
+        _ = controller.handle(.init(key: .q, phase: .down))
+
+        XCTAssertEqual(
+            controller.triggerQLongPress(),
+            .init(actions: [.enterNumericLayer], isConsumed: true)
+        )
+        XCTAssertEqual(session.appliedActions, [.enterNumericLayer])
     }
 
     func testSymbolLayerActionsFlowThroughSession() {
@@ -40,19 +56,21 @@ final class OneHandInputControllerTests: XCTestCase {
         let session = OneHandRecordingSession()
         let controller = OneHandInputController(session: session, configuration: configuration)
 
-        XCTAssertEqual(controller.handle(.init(key: .q, phase: .down)), .init(actions: [.enterSymbolLayer], isConsumed: true))
+        XCTAssertEqual(controller.handle(.init(key: .q, phase: .down)), .init(actions: [], isConsumed: true))
+        XCTAssertEqual(controller.handle(.init(key: .q, phase: .up)), .init(actions: [.enterSymbolLayer], isConsumed: true))
         XCTAssertEqual(controller.handle(.init(key: .w, phase: .down)), .init(actions: [.insertText("，"), .exitSymbolLayer], isConsumed: true))
         XCTAssertEqual(session.appliedActions, [.enterSymbolLayer, .insertText("，"), .exitSymbolLayer])
     }
 
-    func testSpaceChordSuppressesStandaloneSpaceAction() {
+    func testSpaceDoesNotStartNumericChord() {
         let session = OneHandRecordingSession(context: .init(hasCandidates: true))
         let controller = OneHandInputController(session: session)
 
-        XCTAssertEqual(controller.handle(.init(key: .space, phase: .down)), .init(actions: [], isConsumed: true))
-        XCTAssertEqual(controller.handle(.init(key: .w, phase: .down)), .init(actions: [.inputDigit(2)], isConsumed: true))
+        XCTAssertEqual(controller.handle(.init(key: .space, phase: .down)), .init(actions: [.commitFirstCandidate], isConsumed: true))
+        session.context = .init()
+        XCTAssertEqual(controller.handle(.init(key: .w, phase: .down)), .init(actions: [.inputT9Code("2")], isConsumed: true))
         XCTAssertEqual(controller.handle(.init(key: .space, phase: .up)), .init(actions: [], isConsumed: true))
-        XCTAssertEqual(session.appliedActions, [.inputDigit(2)])
+        XCTAssertEqual(session.appliedActions, [.commitFirstCandidate, .inputT9Code("2")])
     }
 
     func testCancelTransientStateReturnsAppliedCleanupActions() {
@@ -60,10 +78,11 @@ final class OneHandInputControllerTests: XCTestCase {
         let controller = OneHandInputController(session: session)
 
         _ = controller.handle(.init(key: .q, phase: .down))
-        _ = controller.handle(.init(key: .space, phase: .down))
+        _ = controller.handle(.init(key: .q, phase: .up))
+        _ = controller.handle(.init(key: .q, phase: .down))
 
-        XCTAssertEqual(controller.cancelTransientState(), [.cancelPendingSpace, .exitSymbolLayer])
-        XCTAssertEqual(session.appliedActions, [.enterSymbolLayer, .cancelPendingSpace, .exitSymbolLayer])
+        XCTAssertEqual(controller.cancelTransientState(), [.cancelPendingQPress, .exitSymbolLayer])
+        XCTAssertEqual(session.appliedActions, [.enterSymbolLayer, .cancelPendingQPress, .exitSymbolLayer])
     }
 
     func testEscapePassesThroughWhenNothingNeedsCancellation() {

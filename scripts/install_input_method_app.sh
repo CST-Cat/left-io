@@ -11,11 +11,15 @@ BACKUP_APP="$TRANSACTION_DIR/previous.app"
 OLD_USER_APPLICATION_APP="${LEFTIO_OLD_USER_APP:-$HOME/Applications/LeftIO.app}"
 SYSTEM_INPUT_METHOD_APP="${LEFTIO_SYSTEM_INPUT_METHOD_APP:-/Library/Input Methods/LeftIO.app}"
 LSREGISTER="${LEFTIO_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
+BUNDLE_ID="io.github.cstcat.inputmethod.leftio"
+MODE_ID="io.github.cstcat.inputmethod.leftio.onehandt9"
+INPUT_SOURCE_SESSION_HELPER="${LEFTIO_INPUT_SOURCE_SESSION_HELPER:-$ROOT_DIR/scripts/manage_input_source_session.sh}"
 PRESERVE_TRANSACTION=0
+RESTORE_LEFTIO_SELECTION=0
 
 register_bundle() {
   local app="$1"
-  if [[ -n "${LEFTIO_TARGET_DIR:-}" ]] && [[ -n "${LEFTIO_REGISTRATION_HELPER:-}" ]]; then
+  if [[ -n "${LEFTIO_REGISTRATION_HELPER:-}" ]]; then
     "$LEFTIO_REGISTRATION_HELPER" "$app"
   else
     "$app/Contents/MacOS/LeftIO" --register-installed-input-source
@@ -24,7 +28,7 @@ register_bundle() {
 
 verify_bundle() {
   local app="$1"
-  if [[ -n "${LEFTIO_TARGET_DIR:-}" ]] && [[ -n "${LEFTIO_VERIFY_HELPER:-}" ]]; then
+  if [[ -n "${LEFTIO_VERIFY_HELPER:-}" ]]; then
     "$LEFTIO_VERIFY_HELPER" "$app"
   else
     LEFTIO_VERIFY_APP="$app" "$ROOT_DIR/scripts/verify_input_method_install.sh"
@@ -33,19 +37,45 @@ verify_bundle() {
 
 clear_runtime_added_attributes() {
   local app="$1"
+  local attributes
 
   # Starting the signed registration helper can cause macOS to attach macl to
   # the containing bundle even though the staged copy was clean. Normalize
-  # only the two attributes that are hard failures, after the helper exits,
-  # and let the strict verifier catch any attribute that could not be removed.
-  xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
-  xattr -dr com.apple.macl "$app" 2>/dev/null || true
+  # only the two attributes that are hard failures. The attachment can arrive
+  # just after the helper exits, so recheck instead of assuming one removal won
+  # the race.
+  for _ in 1 2 3 4; do
+    xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
+    xattr -dr com.apple.macl "$app" 2>/dev/null || true
+    attributes="$(xattr -lr "$app" 2>&1)" || return 1
+    if ! grep -Eq 'com\.apple\.(quarantine|macl)' <<<"$attributes"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "Unable to clear quarantine or macl metadata from $app." >&2
+  return 1
 }
 
 register_and_normalize_bundle() {
   local app="$1"
   register_bundle "$app" || return 1
   clear_runtime_added_attributes "$app"
+}
+
+restore_leftio_selection() {
+  local app="$1"
+  for _ in 1 2 3; do
+    open -n -gj "$app" 2>/dev/null || true
+    sleep 0.4
+    if "$INPUT_SOURCE_SESSION_HELPER" select "$MODE_ID" >/dev/null 2>&1; then
+      sleep 0.2
+      if pgrep -x LeftIO >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+  done
+  return 1
 }
 
 restore_previous_installation() {
@@ -92,6 +122,11 @@ cleanup() {
   else
     rm -rf "$TRANSACTION_DIR"
   fi
+  if [[ "$RESTORE_LEFTIO_SELECTION" == "1" ]] && [[ -d "$TARGET_APP" ]]; then
+    if ! restore_leftio_selection "$TARGET_APP"; then
+      echo "Unable to restore LeftIO as the selected input source after installation." >&2
+    fi
+  fi
 }
 trap cleanup EXIT
 
@@ -106,6 +141,17 @@ if grep -Eq 'com\.apple\.(quarantine|macl)' <<<"$STAGED_ATTRIBUTES"; then
   exit 1
 fi
 codesign -vvv --deep --strict "$STAGING_APP" >/dev/null 2>&1
+
+if [[ -z "${LEFTIO_TARGET_DIR:-}" ]] && [[ "${LEFTIO_SKIP_INPUT_SOURCE_RESTORE:-0}" != "1" ]]; then
+  CURRENT_INPUT_SOURCE="$($INPUT_SOURCE_SESSION_HELPER current)"
+  if [[ "$CURRENT_INPUT_SOURCE" == "$MODE_ID" || "$CURRENT_INPUT_SOURCE" == "$BUNDLE_ID" ]]; then
+    if ! "$INPUT_SOURCE_SESSION_HELPER" select-fallback "$MODE_ID" "$BUNDLE_ID" >/dev/null; then
+      echo "LeftIO is selected, but no safe fallback input source could be selected before updating it." >&2
+      exit 1
+    fi
+    RESTORE_LEFTIO_SELECTION=1
+  fi
+fi
 
 if [[ "${LEFTIO_SKIP_PROCESS_STOP:-0}" != "1" ]]; then
   pkill -x LeftIO 2>/dev/null || true
@@ -149,6 +195,14 @@ fi
 
 rm -rf "$BACKUP_APP" "$OLD_USER_APPLICATION_APP"
 
+if [[ "$RESTORE_LEFTIO_SELECTION" == "1" ]]; then
+  if ! restore_leftio_selection "$TARGET_APP"; then
+    echo "LeftIO was installed, but the installer could not restore it as the selected input source." >&2
+    exit 5
+  fi
+  RESTORE_LEFTIO_SELECTION=0
+fi
+
 cat >&2 <<'MSG'
 LeftIO was installed for the current user.
 
@@ -157,7 +211,9 @@ Next steps:
   2. Open System Settings -> Keyboard -> Text Input -> Edit...
   3. Add "LeftIO 单手九宫格" manually.
 
-This installer does not write com.apple.HIToolbox and does not switch the current input source.
+This installer does not write com.apple.HIToolbox. When updating a currently
+selected LeftIO, it temporarily selects the ASCII fallback and restores LeftIO
+after the new endpoint is running; otherwise it leaves the current source alone.
 If LeftIO appears twice, run: make repair-input-method-sources
 MSG
 

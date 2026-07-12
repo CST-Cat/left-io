@@ -9,7 +9,11 @@ APP_NAME="LeftIO"
 APP_EXECUTABLE_NAME="LeftIO"
 APP_BUNDLE_ID="io.github.cstcat.inputmethod.leftio"
 MODE_ID="io.github.cstcat.inputmethod.leftio.onehandt9"
-CONNECTION_NAME="${APP_BUNDLE_ID}_Connection"
+# Keep the published IMK connection name free of periods. On the supported
+# macOS runtime, imklaunchagent rejects the bundle-id-derived variant as an
+# unrecognized InputMethodConnectionName. This also matches Squirrel and
+# WeType's established <product>_Connection convention.
+CONNECTION_NAME="LeftIO_Connection"
 BUILD_DIR="$ROOT_DIR/.build/input-method"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 FRAMEWORKS_DIR="$APP_DIR/Contents/Frameworks"
@@ -190,6 +194,9 @@ if [[ -d "$RIME_MINIMAL_DIR" ]]; then
   cp "$RIME_MINIMAL_DIR"/* "$RESOURCES_DIR/Rime/"
 fi
 cp "$ROOT_DIR"/data/*.yaml "$RESOURCES_DIR/Rime/"
+if [[ -d "$VENDORED_RIME_ROOT/share/opencc" ]]; then
+  ditto "$VENDORED_RIME_ROOT/share/opencc" "$RESOURCES_DIR/Rime/opencc"
+fi
 cp "$ROOT_DIR/LICENSE" "$RESOURCES_DIR/LICENSE.txt"
 cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
 cp "$ROOT_DIR"/LICENSES/* "$RESOURCES_DIR/Licenses/"
@@ -228,6 +235,15 @@ if [[ -n "$VENDORED_LIBRIME_PATH" ]]; then
     onehand_t9.reverse.bin; do
     if [[ ! -f "$RIME_PREBUILT_DIR/$artifact" ]]; then
       echo "Rime precompile did not produce $artifact." >&2
+      exit 1
+    fi
+  done
+  for opencc_artifact in \
+    opencc/t2s.json \
+    opencc/STCharacters.ocd2 \
+    opencc/STPhrases.ocd2; do
+    if [[ ! -f "$RESOURCES_DIR/Rime/$opencc_artifact" ]]; then
+      echo "Rime OpenCC resource is missing: $opencc_artifact." >&2
       exit 1
     fi
   done

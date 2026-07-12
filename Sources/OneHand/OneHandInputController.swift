@@ -29,11 +29,24 @@ public final class OneHandInputController<Session: OneHandSession> {
     }
 
     @discardableResult
-    public func cancelPendingSpace() -> [OneHandAction] {
-        let actions = stateMachine.cancelPendingSpace()
+    public func triggerQLongPress() -> OneHandHandleResult {
+        let actions = stateMachine.triggerQLongPress(context: session.context)
+        for action in actions {
+            session.apply(action)
+        }
+        return OneHandHandleResult(actions: actions, isConsumed: !actions.isEmpty)
+    }
+
+    @discardableResult
+    public func cancelPendingQPress() -> [OneHandAction] {
+        let actions = stateMachine.cancelPendingQPress()
         for action in actions {
             session.apply(action)
         }
         return actions
+    }
+
+    public func updateConfiguration(_ configuration: OneHandConfiguration) {
+        stateMachine.updateConfiguration(configuration)
     }
 }

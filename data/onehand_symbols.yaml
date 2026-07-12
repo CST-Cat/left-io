@@ -8,3 +8,5 @@ symbols:
   X: "："
   C: "……"
 auto_return: true
+q_tap_layer: symbol
+q_long_press_layer: numeric

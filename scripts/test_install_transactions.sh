@@ -18,6 +18,18 @@ MACL_REGISTRATION_HELPER="$TEST_ROOT/register-with-macl.sh"
   printf '%s\n' 'xattr -w com.apple.macl runtime-added "$1"'
 } > "$MACL_REGISTRATION_HELPER"
 chmod +x "$MACL_REGISTRATION_HELPER"
+INPUT_SOURCE_SESSION_HELPER="$TEST_ROOT/input-source-session.sh"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' 'action="$1"'
+  printf '%s\n' 'shift'
+  printf '%s\n' 'printf "%s" "$action" >> "$LEFTIO_TEST_SESSION_LOG"'
+  printf '%s\n' 'if (( $# > 0 )); then printf " %s" "$@" >> "$LEFTIO_TEST_SESSION_LOG"; fi'
+  printf '%s\n' 'printf "\\n" >> "$LEFTIO_TEST_SESSION_LOG"'
+  printf '%s\n' 'if [[ "$action" == "current" ]]; then printf "%s\\n" "$LEFTIO_TEST_CURRENT_SOURCE"; fi'
+} > "$INPUT_SOURCE_SESSION_HELPER"
+chmod +x "$INPUT_SOURCE_SESSION_HELPER"
 FAKE_HOME="$TEST_ROOT/home"
 USER_TARGET_DIR="$FAKE_HOME/Library/Input Methods"
 USER_TARGET_APP="$USER_TARGET_DIR/LeftIO.app"
@@ -81,6 +93,28 @@ env "${common_user_environment[@]}" \
   "$ROOT_DIR/scripts/install_input_method_app.sh" >/dev/null
 if xattr -lr "$USER_TARGET_APP" 2>/dev/null | grep -q 'com.apple.macl'; then
   echo "User installer retained macl metadata added by the registration helper." >&2
+  exit 1
+fi
+
+WETYPE_TEST_HOME="$TEST_ROOT/wetype-home"
+WETYPE_SESSION_LOG="$TEST_ROOT/wetype-session.log"
+env \
+  HOME="$WETYPE_TEST_HOME" \
+  LEFTIO_SOURCE_APP="$SOURCE_APP" \
+  LEFTIO_OLD_USER_APP="$WETYPE_TEST_HOME/Applications/LeftIO.app" \
+  LEFTIO_SYSTEM_INPUT_METHOD_APP="$TEST_ROOT/no-system-copy/LeftIO.app" \
+  LEFTIO_LSREGISTER=/usr/bin/true \
+  LEFTIO_SKIP_PROCESS_STOP=1 \
+  LEFTIO_REGISTRATION_HELPER=/usr/bin/true \
+  LEFTIO_VERIFY_HELPER=/usr/bin/true \
+  LEFTIO_INPUT_SOURCE_SESSION_HELPER="$INPUT_SOURCE_SESSION_HELPER" \
+  LEFTIO_TEST_SESSION_LOG="$WETYPE_SESSION_LOG" \
+  LEFTIO_TEST_CURRENT_SOURCE=com.tencent.inputmethod.wetype.pinyin \
+  "$ROOT_DIR/scripts/install_input_method_app.sh" >/dev/null
+if [[ "$(wc -l < "$WETYPE_SESSION_LOG" | tr -d ' ')" != "1" ]] ||
+   [[ "$(< "$WETYPE_SESSION_LOG")" != "current" ]]; then
+  echo "User installer changed or tried to restore the input source while WeType was selected." >&2
+  cat "$WETYPE_SESSION_LOG" >&2
   exit 1
 fi
 

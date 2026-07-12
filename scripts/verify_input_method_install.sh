@@ -38,7 +38,7 @@ printf '%s\n' "$BUNDLE_IDENTIFIER" "$BUNDLE_EXECUTABLE" "$CONNECTION_NAME" "$CON
   echo "unexpected bundle executable: $BUNDLE_EXECUTABLE" >&2
   exit 2
 }
-[[ "$CONNECTION_NAME" == "${APP_BUNDLE_ID}_Connection" ]] || {
+[[ "$CONNECTION_NAME" == "LeftIO_Connection" ]] || {
   echo "unexpected input method connection: $CONNECTION_NAME" >&2
   exit 2
 }
@@ -152,6 +152,21 @@ if let current = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() {
     print("current", value(current, kTISPropertyInputSourceID), value(current, kTISPropertyLocalizedName), value(current, kTISPropertyBundleID))
 }
 
+let persistentSources = CFPreferencesCopyAppValue(
+    "AppleEnabledThirdPartyInputSources" as CFString,
+    "com.apple.inputsources" as CFString
+) as? [[String: Any]] ?? []
+let persistentParentCount = persistentSources.filter { source in
+    source["Bundle ID"] as? String == appBundleID
+        && source["InputSourceKind"] as? String == "Keyboard Input Method"
+        && source["Input Mode"] == nil
+}.count
+let persistentModeCount = persistentSources.filter { source in
+    source["Bundle ID"] as? String == appBundleID
+        && source["InputSourceKind"] as? String == "Input Mode"
+        && source["Input Mode"] as? String == modeID
+}.count
+
 print("bundle=\(foundBundle)")
 print("mode=\(foundMode)")
 print("bundleEnabled=\(enabledBundle)")
@@ -160,6 +175,8 @@ print("modeSelectCapable=\(selectCapableMode)")
 print("selected=\(selectedMode)")
 print("bundleParentCount=\(bundleParentCount)")
 print("modeCount=\(modeCount)")
+print("persistentParentCount=\(persistentParentCount)")
+print("persistentModeCount=\(persistentModeCount)")
 
 if !foundBundle || !foundMode {
     exit(2)
@@ -169,5 +186,8 @@ if !enabledBundle || !enabledMode || !selectCapableMode {
 }
 if bundleParentCount != 1 || modeCount != 1 {
     exit(4)
+}
+if persistentParentCount != 1 || persistentModeCount != 1 {
+    exit(5)
 }
 '

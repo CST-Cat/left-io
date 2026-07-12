@@ -22,6 +22,12 @@ public enum OneHandKey: String, CaseIterable, Sendable {
     case escape = "Escape"
     case other = "Other"
 
+    public static let symbolLayerSlots: [OneHandKey] = [
+        .w, .e,
+        .a, .s, .d,
+        .z, .x, .c
+    ]
+
     public var t9Code: String? {
         switch self {
         case .w: "2"
@@ -36,7 +42,7 @@ public enum OneHandKey: String, CaseIterable, Sendable {
         }
     }
 
-    public var numericChordValue: Int? {
+    public var numericLayerValue: Int? {
         switch self {
         case .q: 1
         case .w: 2
@@ -62,12 +68,7 @@ public enum OneHandKey: String, CaseIterable, Sendable {
     }
 
     public var isSymbolLayerSlot: Bool {
-        switch self {
-        case .w, .e, .a, .s, .d, .z, .x, .c:
-            true
-        default:
-            false
-        }
+        Self.symbolLayerSlots.contains(self)
     }
 }
 

@@ -16,6 +16,7 @@ final class SymbolLayerTests: XCTestCase {
         var machine = OneHandStateMachine(configuration: configuration)
 
         _ = machine.handle(.init(key: .q, phase: .down), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .up), context: .init())
 
         XCTAssertEqual(machine.handle(.init(key: .w, phase: .down), context: .init()), [
             .insertText("，"),
@@ -28,8 +29,10 @@ final class SymbolLayerTests: XCTestCase {
         var machine = OneHandStateMachine(configuration: configuration)
 
         _ = machine.handle(.init(key: .q, phase: .down), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .up), context: .init())
 
         XCTAssertEqual(machine.handle(.init(key: .w, phase: .down), context: .init()), [.insertText("，")])
-        XCTAssertEqual(machine.handle(.init(key: .q, phase: .down), context: .init()), [.exitSymbolLayer])
+        _ = machine.handle(.init(key: .q, phase: .down), context: .init())
+        XCTAssertEqual(machine.handle(.init(key: .q, phase: .up), context: .init()), [.exitSymbolLayer])
     }
 }

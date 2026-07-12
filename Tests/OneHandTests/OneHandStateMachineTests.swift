@@ -2,39 +2,31 @@ import XCTest
 @testable import OneHand
 
 final class OneHandStateMachineTests: XCTestCase {
-    func testQFunctionKeyTypesResolveFromContext() {
-        XCTAssertEqual(
-            OneHandQFunctionKeyType.resolve(isSymbolLayerActive: false, context: .init()),
-            .enterSymbolLayer
-        )
-        XCTAssertEqual(
-            OneHandQFunctionKeyType.resolve(isSymbolLayerActive: false, context: .init(isComposing: true)),
-            .insertSyllableDelimiter
-        )
-        XCTAssertEqual(
-            OneHandQFunctionKeyType.resolve(isSymbolLayerActive: true, context: .init(isComposing: true)),
-            .exitSymbolLayer
-        )
-    }
-
     func testQEntersSymbolLayerWhenNotComposing() {
         var machine = OneHandStateMachine()
 
-        XCTAssertEqual(machine.handle(.init(key: .q, phase: .down), context: .init()), [.enterSymbolLayer])
+        XCTAssertEqual(machine.handle(.init(key: .q, phase: .down), context: .init()), [])
+        XCTAssertEqual(machine.handle(.init(key: .q, phase: .up), context: .init()), [.enterSymbolLayer])
     }
 
     func testQInsertsSyllableDelimiterWhileComposing() {
         var machine = OneHandStateMachine()
 
-        XCTAssertEqual(machine.handle(.init(key: .q, phase: .down), context: .init(isComposing: true)), [.insertSyllableDelimiter])
+        XCTAssertEqual(machine.handle(.init(key: .q, phase: .down), context: .init(isComposing: true)), [])
+        XCTAssertEqual(
+            machine.handle(.init(key: .q, phase: .up), context: .init(isComposing: true)),
+            [.insertSyllableDelimiter]
+        )
     }
 
     func testQExitsSymbolLayerWhenLayerIsActive() {
         var machine = OneHandStateMachine()
 
         _ = machine.handle(.init(key: .q, phase: .down), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .up), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .down), context: .init())
 
-        XCTAssertEqual(machine.handle(.init(key: .q, phase: .down), context: .init()), [.exitSymbolLayer])
+        XCTAssertEqual(machine.handle(.init(key: .q, phase: .up), context: .init()), [.exitSymbolLayer])
     }
 
     func testGridKeysEmitT9Codes() {
@@ -84,24 +76,26 @@ final class OneHandStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.handle(.init(key: .digit4, phase: .down), context: .init()), [.selectCandidate(3)])
     }
 
-    func testCancelTransientStateClearsSymbolLayerAndPendingSpace() {
+    func testCancelTransientStateClearsSymbolLayerAndPendingQPress() {
         var machine = OneHandStateMachine()
 
         _ = machine.handle(.init(key: .q, phase: .down), context: .init())
-        _ = machine.handle(.init(key: .space, phase: .down), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .up), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .down), context: .init())
 
-        XCTAssertEqual(machine.cancelTransientState(), [.cancelPendingSpace, .exitSymbolLayer])
+        XCTAssertEqual(machine.cancelTransientState(), [.cancelPendingQPress, .exitSymbolLayer])
     }
 
     func testEscapeCancelsTransientStateAndComposition() {
         var machine = OneHandStateMachine()
 
         _ = machine.handle(.init(key: .q, phase: .down), context: .init())
-        _ = machine.handle(.init(key: .space, phase: .down), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .up), context: .init())
+        _ = machine.handle(.init(key: .q, phase: .down), context: .init())
 
         XCTAssertEqual(
             machine.handle(.init(key: .escape, phase: .down), context: .init(isComposing: true)),
-            [.cancelPendingSpace, .exitSymbolLayer, .cancelComposition]
+            [.cancelPendingQPress, .exitSymbolLayer, .cancelComposition]
         )
     }
 }

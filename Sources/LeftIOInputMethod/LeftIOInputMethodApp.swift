@@ -104,6 +104,35 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
     }
 
     private func runInstallFlow() -> InstallResult {
+        let targetURL = Self.userInstalledBundleURL()
+        let shouldRestoreLeftIO = Self.currentInputSourceIsLeftIO()
+        if shouldRestoreLeftIO,
+           !Self.selectASCIIFallback() {
+            return .failed(
+                "当前正在使用 LeftIO，但安装器无法先切到安全的 ASCII 输入源，因此没有替换正在运行的输入法。"
+            )
+        }
+
+        Self.terminateInstalledInputMethodInstances(at: targetURL)
+        let result = runInstallTransaction()
+
+        guard shouldRestoreLeftIO else {
+            return result
+        }
+        guard Self.restoreLeftIOSelection(at: targetURL) else {
+            switch result {
+            case .registered:
+                return .failed("LeftIO 已安装并注册，但无法恢复为当前输入法。")
+            case .copiedButNotRegistered:
+                return .failed("LeftIO 已复制但未完成注册，而且无法恢复之前的 LeftIO 选择状态。")
+            case let .failed(message):
+                return .failed("\(message)；同时无法恢复之前的 LeftIO 选择状态。")
+            }
+        }
+        return result
+    }
+
+    private func runInstallTransaction() -> InstallResult {
         let fileManager = FileManager.default
         let sourceURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
         let targetURL = Self.userInstalledBundleURL()
@@ -238,6 +267,94 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
         return .registered
     }
 
+    private static func currentInputSourceIsLeftIO() -> Bool {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
+            return false
+        }
+        return inputSourceIsLeftIO(source)
+    }
+
+    private static func inputSourceIsLeftIO(_ source: TISInputSource) -> Bool {
+        let bundleID = bundleIdentifier as String
+        let modeID = inputModeIdentifier as String
+        return stringProperty(kTISPropertyInputSourceID, for: source) == bundleID
+            || stringProperty(kTISPropertyBundleID, for: source) == bundleID
+            || stringProperty(kTISPropertyInputSourceID, for: source) == modeID
+            || stringProperty(kTISPropertyInputModeID, for: source) == modeID
+    }
+
+    private static func selectASCIIFallback() -> Bool {
+        guard let fallback = TISCopyCurrentASCIICapableKeyboardInputSource()?.takeRetainedValue(),
+              !inputSourceIsLeftIO(fallback),
+              boolProperty(kTISPropertyInputSourceIsEnabled, for: fallback) == true,
+              boolProperty(kTISPropertyInputSourceIsSelectCapable, for: fallback) == true,
+              TISSelectInputSource(fallback) == noErr else {
+            return false
+        }
+        drainRunLoop(for: 0.25)
+        return !currentInputSourceIsLeftIO()
+    }
+
+    private static func restoreLeftIOSelection(at bundleURL: URL) -> Bool {
+        for _ in 0..<3 {
+            try? runTool(
+                "/usr/bin/open",
+                arguments: ["-n", "-gj", bundleURL.path]
+            )
+            drainRunLoop(for: 0.4)
+
+            let modeID = inputModeIdentifier as String
+            let mode = inputSources(
+                property: nil,
+                value: kCFNull,
+                includeAllInstalled: true
+            ).first { source in
+                (stringProperty(kTISPropertyInputSourceID, for: source) == modeID
+                    || stringProperty(kTISPropertyInputModeID, for: source) == modeID)
+                    && boolProperty(kTISPropertyInputSourceIsEnabled, for: source) == true
+                    && boolProperty(kTISPropertyInputSourceIsSelectCapable, for: source) == true
+            }
+
+            guard let mode,
+                  TISSelectInputSource(mode) == noErr else {
+                continue
+            }
+            drainRunLoop(for: 0.25)
+            if currentInputSourceIsLeftIO() {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func terminateInstalledInputMethodInstances(at bundleURL: URL) {
+        let expectedPath = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let applications = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleIdentifier as String
+        ).filter { application in
+            guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+                  let runningBundleURL = application.bundleURL else {
+                return false
+            }
+            return runningBundleURL.resolvingSymlinksInPath().standardizedFileURL.path == expectedPath
+        }
+
+        for application in applications {
+            application.terminate()
+        }
+        let deadline = Date().addingTimeInterval(0.8)
+        while applications.contains(where: { !$0.isTerminated }),
+              deadline.timeIntervalSinceNow > 0 {
+            drainRunLoop(for: min(0.1, deadline.timeIntervalSinceNow))
+        }
+        for application in applications where !application.isTerminated {
+            application.forceTerminate()
+        }
+        if !applications.isEmpty {
+            drainRunLoop(for: 0.2)
+        }
+    }
+
     private func presentInstallResult(_ result: InstallResult) {
         let alert = NSAlert()
         alert.addButton(withTitle: "好")
@@ -332,16 +449,36 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
     }
 
     private static func normalizeRuntimeAddedAttributes(at url: URL) throws {
-        for attribute in ["com.apple.quarantine", "com.apple.macl"] {
-            try runTool(
-                "/usr/bin/xattr",
-                arguments: ["-dr", attribute, url.path]
-            )
+        var lastError: Error?
+        for attempt in 0..<4 {
+            for attribute in ["com.apple.quarantine", "com.apple.macl"] {
+                try? runTool(
+                    "/usr/bin/xattr",
+                    arguments: ["-dr", attribute, url.path]
+                )
+            }
+
+            do {
+                try ensureNoUnsafeExtendedAttributes(at: url)
+                try runTool(
+                    "/usr/bin/codesign",
+                    arguments: ["--verify", "--deep", "--strict", url.path]
+                )
+                return
+            } catch {
+                lastError = error
+                if attempt < 3 {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+            }
         }
-        try ensureNoUnsafeExtendedAttributes(at: url)
-        try runTool(
-            "/usr/bin/codesign",
-            arguments: ["--verify", "--deep", "--strict", url.path]
+
+        throw lastError ?? NSError(
+            domain: "io.github.cstcat.inputmethod.leftio.install",
+            code: 2,
+            userInfo: [
+                NSLocalizedDescriptionKey: "无法清除 LeftIO 的 quarantine 或 macl 扩展属性"
+            ]
         )
     }
 
@@ -510,6 +647,29 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
             writeLog(
                 "register helper failed final verification bundleEnabled=\(verifiedBundleEnabled) modeEnabled=\(verifiedModeEnabled) modeSelectCapable=\(verifiedModeSelectCapable)"
             )
+            return false
+        }
+
+        let persistentSources = CFPreferencesCopyAppValue(
+            "AppleEnabledThirdPartyInputSources" as CFString,
+            "com.apple.inputsources" as CFString
+        ) as? [[String: Any]] ?? []
+        let persistentParentCount = persistentSources.filter { source in
+            source["Bundle ID"] as? String == bundleIdentifier as String
+                && source["InputSourceKind"] as? String == "Keyboard Input Method"
+                && source["Input Mode"] == nil
+        }.count
+        let persistentModeCount = persistentSources.filter { source in
+            source["Bundle ID"] as? String == bundleIdentifier as String
+                && source["InputSourceKind"] as? String == "Input Mode"
+                && source["Input Mode"] as? String == inputModeIdentifier as String
+        }.count
+        writeLog(
+            "register helper persistent parent=\(persistentParentCount) mode=\(persistentModeCount)"
+        )
+        guard persistentParentCount == 1,
+              persistentModeCount == 1 else {
+            writeLog("register helper failed: persistent parent/mode entries are not unique")
             return false
         }
 
@@ -716,29 +876,4 @@ final class LeftIOInputMethodApp: NSObject, NSApplicationDelegate {
         return String(describing: unsafeBitCast(rawValue, to: CFTypeRef.self))
     }
 
-    private func firstMatchingInputSource(
-        property: CFString?,
-        value: CFTypeRef,
-        includeAllInstalled: Bool
-    ) -> TISInputSource? {
-        matchingInputSources(
-            property: property,
-            value: value,
-            includeAllInstalled: includeAllInstalled
-        ).first
-    }
-
-    private func matchingInputSources(
-        property: CFString?,
-        value: CFTypeRef,
-        includeAllInstalled: Bool
-    ) -> [TISInputSource] {
-        let filter = property.map { [$0 as String: value] as CFDictionary }
-        guard let unmanagedList = TISCreateInputSourceList(filter, includeAllInstalled) else {
-            return []
-        }
-
-        let list = unmanagedList.takeRetainedValue() as [AnyObject]
-        return list.map { unsafeDowncast($0, to: TISInputSource.self) }
-    }
 }

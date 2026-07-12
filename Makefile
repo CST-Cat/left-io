@@ -1,6 +1,6 @@
 XCODE_DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
 
-.PHONY: test xcodebuild-test test-rime-abi test-prebuilt-rime test-install-transactions generate-sample-dict build-vendored-librime build-input-method build-dmg build-release-dmg verify-distribution install-input-method install-input-method-system verify-input-method repair-input-method-sources uninstall-input-method
+.PHONY: test xcodebuild-test test-rime-abi test-rime-traits test-prebuilt-rime test-install-transactions generate-sample-dict build-vendored-librime build-input-method build-dmg build-release-dmg verify-distribution install-input-method install-input-method-system verify-input-method repair-input-method-sources uninstall-input-method
 
 test:
 	DEVELOPER_DIR="$(XCODE_DEVELOPER_DIR)" swift test --disable-swift-testing
@@ -13,6 +13,9 @@ test-install-transactions:
 
 test-rime-abi:
 	scripts/test_rime_abi_guard.sh
+
+test-rime-traits:
+	scripts/test_rime_trait_lifetime.sh
 
 test-prebuilt-rime:
 	scripts/test_prebuilt_rime_startup.sh

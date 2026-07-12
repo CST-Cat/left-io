@@ -14,8 +14,8 @@ LeftIO's original source code and documentation are licensed under the BSD 3-Cla
 
 ```text
 Q          W ABC      E DEF
-symbol /
-delimiter
+tap / hold
+layer control
 
 A GHI      S JKL      D MNO
 
@@ -24,29 +24,36 @@ Z PQRS     X TUV      C WXYZ
 
 ## Implemented Core Behavior
 
-`Q` is a context-sensitive function key with three explicit types:
+`Q` distinguishes a tap from a 0.45-second hold:
 
 ```text
-enter symbol layer          idle composition       Q -> enter symbol layer
-insert syllable delimiter   composing pinyin       Q -> insert syllable delimiter
-exit symbol layer           inside symbol layer     Q -> exit symbol layer
+tap Q while idle               -> enter the configured tap layer (symbol by default)
+hold Q for 0.45 seconds        -> toggle the configured hold layer (numeric by default)
+tap Q while composing          -> insert a syllable delimiter
+tap Q inside the symbol layer  -> exit the symbol layer
+tap Q inside the numeric layer -> digit 1
 ```
 
-`Space` is handled as a chord, not as a long press:
+The numeric layer preserves the physical nine-key grid and remains active until
+another long `Q`, `Esc`, or another transient-state reset exits it:
 
 ```text
-Space down + QWE/ASD/ZXC -> digits 1-9
-Space down + V           -> newline
-Space up alone           -> first candidate, or ordinary space
+Q W E -> 1 2 3
+A S D -> 4 5 6
+Z X C -> 7 8 9
 ```
+
+`Space` no longer starts a numeric chord. Its key-down immediately commits the
+first candidate/current composition, or inserts an ordinary space while idle.
 
 `Esc` cancels transient input state:
 
 ```text
-pending Space chord      -> cancel pending Space
+pending Q gesture        -> cancel pending Q
 inside symbol layer      -> exit symbol layer
+inside numeric layer     -> exit numeric layer
 composing text           -> clear current composition
-idle                      -> pass through to the client
+idle                     -> pass through to the client
 ```
 
 Auxiliary keys:
@@ -72,13 +79,13 @@ Sources/OneHand/
 ├── OneHandKey.swift
 ├── OneHandLexicon.swift
 ├── OneHandLexiconSession.swift
-├── OneHandQFunctionKeyType.swift
+├── NumericLayerController.swift
 ├── OneHandRecordingSession.swift
 ├── OneHandRimeBridge.swift
 ├── OneHandRimeDataProvider.swift
 ├── OneHandStateMachine.swift
+├── OneHandSymbolCustomization.swift
 ├── OneHandT9Encoder.swift
-├── SpaceChordController.swift
 └── SymbolLayerController.swift
 
 Sources/OneHandKeyboard/
@@ -95,7 +102,8 @@ Sources/CRimeBridge/
 
 Sources/LeftIOInputMethod/
 ├── LeftIOInputController.swift
-└── LeftIOInputMethodApp.swift
+├── LeftIOInputMethodApp.swift
+└── SymbolLayerSettingsWindowController.swift
 
 Sources/LeftIOLauncher/
 └── LeftIOLauncher.swift
@@ -121,6 +129,7 @@ scripts/
 ├── test_install_transactions.sh
 ├── test_prebuilt_rime_startup.sh
 ├── test_rime_abi_guard.sh
+├── test_rime_trait_lifetime.sh
 ├── uninstall_input_method_app.sh
 ├── verify_distribution.sh
 └── verify_input_method_install.sh
@@ -134,12 +143,15 @@ Tests/OneHandTests/
 ├── OneHandRimeIntegrationTests.swift
 ├── OneHandRimeSessionTests.swift
 ├── OneHandStateMachineTests.swift
-├── SpaceChordTests.swift
+├── QGestureAndNumericLayerTests.swift
 ├── SymbolLayerTests.swift
 └── T9EncoderTests.swift
 
 Tests/OneHandKeyboardTests/
 └── OneHandPhysicalKeyMapperTests.swift
+
+Tests/LeftIOInputMethodTests/
+└── InputLayerSettingsStoreTests.swift
 ```
 
 `OneHandRimeSession` lives in `Sources/OneHand/OneHandRimeBridge.swift`. The app `Info.plist` and icons are generated into `.build/input-method/LeftIO.app` by `scripts/build_input_method_app.sh`; they are not checked in under `Sources/`.
@@ -161,6 +173,8 @@ make xcodebuild-test
 ```
 
 `make test` runs XCTest only and disables Swift Testing discovery. The package currently uses XCTest, and this avoids a SwiftPM testing-helper code-signing issue on this macOS/Xcode setup.
+
+`make test-rime-traits` guards the C bridge contract that caller-owned trait strings may expire immediately after bridge creation. In particular, it catches regressions where librime/glog keeps Swift `withCString` storage past its lifetime.
 
 `make build-vendored-librime` checks out the exact librime 1.17.0 source commit recorded by the build script, initializes its pinned submodules, verifies Boost's SHA-256, and builds `arm64` plus `x86_64`. It refuses tracked modifications in the checkout. CMake must already be installed; the build does not run an unpinned `pip install`.
 
@@ -196,7 +210,7 @@ make build-release-dmg
 
 This path requires explicit three-component `LEFTIO_VERSION` and monotonically increasing `LEFTIO_BUILD_NUMBER` values plus universal binaries. It discards incremental dependency outputs and re-extracts Boost from the SHA-256-verified archive, signs the nested engine and app with hardened runtime, signs and notarizes the DMG, rejects an accepted submission if its notary log still contains issues, staples the ticket, mounts the result, checks bundled license notices, and runs Gatekeeper assessment. Development builds remain locally signed and are not represented as notarized releases.
 
-For development, install the input method for the current user. This copies the app to `~/Library/Input Methods/LeftIO.app`, asks TIS to register and enable it, and leaves the current input source unchanged.
+For development, install the input method for the current user. This copies the app to `~/Library/Input Methods/LeftIO.app` and asks TIS to register and enable it. If LeftIO is already selected during an update, the installer temporarily selects the ASCII fallback before replacing the live endpoint, starts the new bundle, and restores LeftIO afterward. Other current input sources are left unchanged.
 
 ```sh
 make install-input-method
@@ -234,7 +248,7 @@ To also remove a system-level copy, run:
 LEFTIO_UNINSTALL_SYSTEM=1 make uninstall-input-method
 ```
 
-The install and uninstall scripts use TIS registration APIs and do not write `com.apple.HIToolbox` or switch the current input source. A user-only uninstall does not disable the TIS source while a system copy remains. Lifecycle logs live under `~/Library/Application Support/LeftIO`; no shared writable log path is used. Per-key event logging is disabled by default because it can contain typed characters. For an explicit debugging session, enable `LeftIOEnableInputEventLogging` in the app defaults (or launch with `LEFTIO_ENABLE_INPUT_EVENT_LOG=1`) and disable it again afterward. The installed input-method app is a direct InputMethodKit app bundle generated by `scripts/build_input_method_app.sh`; no embedded `.appex` is produced.
+The install and uninstall scripts use TIS registration APIs and do not write `com.apple.HIToolbox`. A normal install leaves the current input source alone. The only exception is updating LeftIO while LeftIO itself is selected: the user-level installer temporarily selects an enabled ASCII fallback before stopping the old endpoint, then restores LeftIO only after the new endpoint is running. It never restores an arbitrary sampled source such as WeType or ABC. A user-only uninstall does not disable the TIS source while a system copy remains. Lifecycle logs live under `~/Library/Application Support/LeftIO`; no shared writable log path is used. Per-key event logging is disabled by default because it can contain typed characters. For an explicit debugging session, enable `LeftIOEnableInputEventLogging` in the app defaults (or launch with `LEFTIO_ENABLE_INPUT_EVENT_LOG=1`) and disable it again afterward. The installed input-method app is a direct InputMethodKit app bundle generated by `scripts/build_input_method_app.sh`; no embedded `.appex` is produced.
 
 See [docs/leftio-input-method-lifecycle.md](docs/leftio-input-method-lifecycle.md) for the full install, registration, verification, and uninstall lifecycle.
 
@@ -268,7 +282,7 @@ if let event = OneHandMacKeyMapper.event(from: nsEvent) {
 }
 ```
 
-The InputMethodKit adapter uses `isConsumed`, not action count, to decide whether to swallow the original key event. `Space` key-down deliberately returns an empty action list because the controller is waiting to determine whether the user is starting a chord or pressing Space alone, but that key event is still consumed. Idle `Esc` and other pass-through events remain available to the client even when the process-wide R-key event tap is active.
+The InputMethodKit adapter uses `isConsumed`, not action count, to decide whether to swallow the original key event. `Q` key-down deliberately returns an empty action list while the host waits for key-up or the 0.45-second long-press timer, but the original event is still consumed. `Space` resolves immediately on key-down and has no numeric-chord state. Idle `Esc` and other pass-through events remain available to the client even when the process-wide event tap is active.
 
 `OneHandSession` is the host boundary:
 
@@ -311,7 +325,11 @@ OneHandRecordingSession
 -> records actions without AppKit or candidate UI
 ```
 
-## Symbol Layer Configuration
+## Input Layer Configuration
+
+When LeftIO is selected, open the macOS input-source menu in the top-right menu bar and choose `自定义输入层…`. The settings window independently selects whether an idle `Q` tap and a `Q` long press enter the symbol or numeric layer. It also edits the eight physical symbol slots `W/E/A/S/D/Z/X/C`. Saving applies the new trigger choices and symbols to every active LeftIO controller immediately and stores only values that differ from the bundled defaults. `恢复默认` removes those overrides, and saved values survive a LeftIO restart.
+
+The bundled defaults remain in `data/onehand_symbols.yaml`:
 
 `data/onehand_symbols.yaml` supports both literal text and a small built-in action set:
 
@@ -321,6 +339,8 @@ symbols:
   E: action:page_down
   A: "action:delete_backward"
 auto_return: true
+q_tap_layer: symbol
+q_long_press_layer: numeric
 ```
 
 Supported action names:

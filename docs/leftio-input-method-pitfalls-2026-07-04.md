@@ -809,33 +809,50 @@ modeSelectCapable=true
 
 只看到 `bundle=true/mode=true` 不再算通过。
 
-### 18.9 `InputMethodConnectionName` 不要随便起短名
+### 18.9 `InputMethodConnectionName` 不能靠“看起来更规范”猜
 
-之前 LeftIO 使用：
+最早的旧值 `LeftIOInputMethod_1_Connection` 被 `imklaunchagent` 明确拒绝，改成 `LeftIO_Connection` 后拒绝日志曾经消失。后来仅凭“bundle-id 派生连接名可能更稳定”的推测，又改成：
+
+```text
+io.github.cstcat.inputmethod.leftio_Connection
+```
+
+2026-07-12 的真实会话证明这次推测是错的。用户已经选中 LeftIO，但 `Q/W` 仍按普通字母进入文本框；统一日志给出直接证据：
+
+```text
+Refusing connection name for bundle: unrecognized 'InputMethodConnectionName' value
+NO Endpoint, Bail & Post to request completion queue!
+```
+
+同一时刻只能看到 `controller init`，看不到对应文本 client 的 `activateServer`。这解释了为什么 TIS、进程和静态状态机测试都正常，用户实际按键却完全不进入 LeftIO。
+
+本机已安装的微信输入法和当前 Squirrel 源码都使用不带句点的产品名连接：
+
+```text
+WeType_Connection
+Squirrel_Connection
+```
+
+因此 LeftIO 恢复为：
 
 ```text
 InputMethodConnectionName = LeftIO_Connection
 ```
 
-这看起来能让 `IMKServer initialized=true`，但 macOS 的 IMK launch/endpoint 逻辑很可能更偏向 bundle-id 派生的连接名。成熟输入法常见模式是：
+切离 LeftIO、更新 bundle、重启 `imklaunchagent`/输入菜单进程，再用系统快捷键切回后，日志重新出现完整链路：
 
 ```text
-$(CFBundleIdentifier)_Connection
+controller init
+activateServer
+eventTapR controllerBound active=true currentSourceIsLeftIO=true
 ```
 
-因此构建脚本已改为：
+教训：
 
-```sh
-CONNECTION_NAME="${APP_BUNDLE_ID}_Connection"
-```
-
-当前生成结果：
-
-```text
-InputMethodConnectionName = io.github.cstcat.inputmethod.leftio_Connection
-```
-
-注意：连接名修正后，如果系统里已经有 parent-disabled 或旧 endpoint 缓存，仍可能 `TISSelectInputSource -> -50`。这时不能把 `-50` 误判为连接名改坏了，必须先看 parent source 是否 `enabled=0`。
+- 连接名必须以当前 macOS 的统一日志和成熟输入法实物为准，不能把社区建议或命名美感当成运行事实。
+- `IMKServer initialized=true` 只说明服务端对象创建了；必须继续看到 client 对应的 `activateServer`。
+- 修改 connection name 后要重建 IMK endpoint 缓存，否则新旧结论会混在同一会话里。
+- 如果 parent source 本身 `enabled=0`，仍要先修 parent-disabled；connection name 和 TIS 启用状态是两个独立门槛。
 
 ### 18.10 当前最小恢复口径
 
@@ -945,7 +962,7 @@ current io.github.cstcat.inputmethod.leftio.onehandt9
 但脚本里切换输入源不一定立刻拉起 input method app；通常需要真实文本 client 聚焦后 IMK 才请求 endpoint。手动 `open ~/Library/Input Methods/LeftIO.app` 后，server 以新连接名启动：
 
 ```text
-starting input method server bundle=io.github.cstcat.inputmethod.leftio connection=io.github.cstcat.inputmethod.leftio_Connection
+starting input method server bundle=io.github.cstcat.inputmethod.leftio connection=LeftIO_Connection
 IMKServer initialized=true
 eventTapR enabled
 ```
@@ -1265,3 +1282,269 @@ pkill -x LeftIO
 - compact/expanded 来回切时 compact 高度应该直接回到 `44`，不能再出现 `206 -> 162 -> 118 -> 74 -> 44` 这种旧高度逐步回落。
 - 展开态最后一行即使不足 4 个候选，也仍然应该显示 expanded，而不是被误判回 compact。
 - 如果总候选数不超过 4，按 `F/G` 不应该假展开。
+
+### 18.17 2026-07-12 安装验证全绿，但菜单栏仍不显示 LeftIO
+
+这次再次证明：输入法 bundle 安装成功、TIS 枚举成功，仍然不等于用户已经能在菜单栏或 Fn 选择器里看到并使用它。
+
+症状：
+
+- 最新 `LeftIO.app` 已安装到 `~/Library/Input Methods`。
+- 用户已经注销并重新登录。
+- `make verify-input-method` 仍报告 parent/mode 存在、启用且 mode 可选择。
+- 系统设置的“已启用输入法”列表甚至还能看到 `LeftIO 单手九宫格`。
+- 但菜单栏/Fn 选择器不显示 LeftIO，当前会话也没有 LeftIO 进程。
+
+修复前的假阳性证据：
+
+```text
+bundle=true
+mode=true
+bundleEnabled=true
+modeEnabled=true
+modeSelectCapable=true
+selected=false
+bundleParentCount=1
+modeCount=1
+```
+
+这些结果只能证明 TIS 当前能枚举 source，不能证明该 mode 已经进入用户的持久启用集合，也不能证明 IMK endpoint/controller 已经启动。
+
+修复前的关键差异是：
+
+```text
+com.apple.HIToolbox AppleEnabledInputSources:
+  没有 LeftIO
+
+com.apple.inputsources AppleEnabledThirdPartyInputSources:
+  有 LeftIO parent Keyboard Input Method
+  没有 LeftIO mode io.github.cstcat.inputmethod.leftio.onehandt9
+```
+
+同时：
+
+```text
+TIS parent enabled=true
+TIS mode enabled=true selectCapable=true
+LeftIO process: missing
+LeftIO.server.log: missing
+```
+
+所以真实状态是：
+
+1. bundle 文件层已经安装。
+2. TIS 会话缓存层能枚举 parent/mode。
+3. 持久启用集合只有 parent，没有 selectable mode。
+4. 系统设置、菜单栏/Fn 选择器和 TIS 查询由不同缓存/偏好组合生成，因此可以互相矛盾。
+5. IMK 没有请求 endpoint，也没有创建 controller。
+
+为什么注销仍然无效：
+
+- 注销/登录只会重新读取持久状态，不会凭空补出缺失的 mode 条目。
+- 如果持久集合本身就是 `parent-only`，新会话只会稳定重现同一个半残状态。
+- `TISRegisterInputSource` / `TISEnableInputSource` 返回成功也不会保证系统设置完成了等价于“用户手动添加 mode”的持久写入。
+
+本次有效修复严格走系统设置，不直接写 Apple plist：
+
+1. 打开“系统设置 -> 键盘 -> 文字输入 -> 编辑”。
+2. 只移除 `LeftIO 单手九宫格`，不动 ABC、简体拼音或微信输入法。
+3. 点击“添加”，在“简体中文”下重新选择 `LeftIO 单手九宫格`。
+4. 完成后重新读取持久集合。
+5. 用系统输入法快捷键真实切换到 LeftIO，并检查进程和 controller 日志。
+
+修复后，第三方持久启用集合同时出现：
+
+```text
+{
+  Bundle ID = io.github.cstcat.inputmethod.leftio;
+  Input Mode = io.github.cstcat.inputmethod.leftio.onehandt9;
+  InputSourceKind = Input Mode;
+}
+{
+  Bundle ID = io.github.cstcat.inputmethod.leftio;
+  InputSourceKind = Keyboard Input Method;
+}
+```
+
+真实切换后的验收证据：
+
+```text
+current = io.github.cstcat.inputmethod.leftio.onehandt9
+selected=true
+bundleParentCount=1
+modeCount=1
+```
+
+并且新进程日志必须出现：
+
+```text
+eventTapR enabled
+controller init
+activateServer
+session prewarm backend=librime complete
+```
+
+这次故障揭示了五个必须分开验收的层级：
+
+```text
+bundle 文件与签名
+  -> TIS parent/mode 注册和启用
+  -> 持久启用集合中的 parent + mode
+  -> 菜单栏/Fn 选择器真实可见并能切换
+  -> IMKServer、controller init、activateServer
+```
+
+以后安装完成的验收门槛：
+
+- 不能只看 copy、签名或 `bundle=true/mode=true`。
+- 不能只看系统设置列表中有一行 LeftIO。
+- 必须确认持久启用集合同时包含 LeftIO parent 和唯一 mode。
+- 必须通过系统菜单或快捷键真实切到 LeftIO，不能用脚本强切结果代替用户路径。
+- 必须看到新 LeftIO 进程以及 `controller init`、`activateServer`。
+- 如果持久 mode 缺失，应该明确报告“尚未完成用户可见安装”，并引导系统设置移除/重加；不能继续宣称安装成功。
+
+禁止再次采用的判断：
+
+- “已经注销过，所以缓存一定没问题。”
+- “TIS enabled=true，所以菜单栏一定会显示。”
+- “系统设置里能看到，所以 IMK controller 一定会启动。”
+- “继续重装或重复 TISEnable 就会自然修好。”
+- “直接补 Apple plist 比系统设置重加更省事。”
+
+正常设计目标仍然是：首次安装最多手动添加一次，后续更新只替换 bundle，不应每次都移除重加。本次之所以麻烦，是早期调试遗留的半残持久状态叠加了不完整的验收，而不是用户操作有误。本轮已经收紧验证脚本：`persistentParentCount` 和 `persistentModeCount` 都必须恰好为 `1`，否则直接失败，避免再次出现“脚本全绿、用户看不到”的假成功。
+
+### 18.18 2026-07-12 `withCString` 生命周期会把真实按键路径炸在 glog/OpenCC
+
+用户实际测试 `Q/W` 只得到普通字母后，安装版还出现过一次新的 `EXC_BAD_ACCESS`。崩溃报告的关键栈是：
+
+```text
+_platform_strlen
+glog LogFileObject::Write
+OpenCC Initialize
+RimeSetInput
+LeftIOInputController
+```
+
+根因不在符号层状态机。Swift 创建 Rime bridge 时通过 `withCString` 传入 `app_name`；C bridge 虽然复制了该字符串，却在 `api->setup()` / `initialize()` 的 `RimeTraits` 中仍传原始临时指针。glog 会把 `traits.app_name` 留到后续日志路径使用，Swift closure 结束后该指针已经失效，所以一旦 OpenCC 延迟写错误日志，就在 `strlen` 崩溃。
+
+同时，安装包过去只复制了 Rime YAML 和预编译表，没有复制 `share/opencc`。因此 `t2s.json`、`STCharacters.ocd2`、`STPhrases.ocd2` 缺失，正好把运行时推入延迟错误日志路径。这是两个独立问题叠加：
+
+1. OpenCC 资源缺失会让简繁转换初始化失败。
+2. trait 指针悬空会让“记录这个失败”本身崩溃。
+
+修复：
+
+- 在 `api->setup()` 之前，让所有调用方提供的 trait 字符串都指向 bridge 的进程级副本。
+- 构建 app 时完整复制 vendored `share/opencc`。
+- 构建阶段强制检查 `t2s.json`、`STCharacters.ocd2`、`STPhrases.ocd2`。
+- 增加 `make test-rime-traits`：fake librime 在 setup 后保留 `app_name`，测试立即覆盖调用方缓冲区，再验证后续 API 仍能读到原值。
+- `make test-prebuilt-rime` 也覆盖调用方 `app_name`，防止只在 fake 测试里成立。
+
+教训：C API 初始化成功不代表 trait 字符串只在初始化期间使用；凡是从 Swift `withCString` 跨到含日志系统的 C/C++ 库，都必须按“可能长期保留”处理。
+
+### 18.19 2026-07-12 多个 IMK controller 会让单一 weak 指针悄悄失去路由
+
+InputMethodKit 会为不同文本 client 创建多个 controller，真实日志中出现过两个 controller 交错 `activateServer` / `deactivateServer`。旧的 process-wide event tap 只保存一个：
+
+```swift
+static weak var activeController: LeftIOInputController?
+```
+
+后激活的临时 controller 覆盖旧指针；它停用时又把指针清空。此时另一个 controller 仍然 active，但事件 tap 已经没有目标，于是 `Q`、`Space` 和九宫格键继续穿透成普通键。状态机测试仍会全绿，因为故障发生在状态机之前。
+
+修复后使用弱引用活跃栈：
+
+- `activateServer` / `handle` 把当前 controller 移到栈尾。
+- `deactivateServer` / close 只移除自身。
+- 取路由目标时清理已释放或不再 active 的引用。
+- 最新 controller 停用后，自动回退到最近一个仍 active 的 controller。
+- 保留 `activeInputClient`，避免 event tap 回调时 `client()` 暂时为空就丢失输出目标。
+
+这一层的验收不能再用“状态机动作正确”代替。必须同时看到：
+
+```text
+currentSourceIsLeftIO=true
+activateServer
+eventTapR controllerBound active=true
+```
+
+最后还要以用户物理键盘实际输出为准。自动化工具合成的按键可能绕开 session event tap；它失败不能反过来否定用户的真机结果，它成功也不能替代用户已经报告的失败。
+
+### 18.20 2026-07-12 顶部输入法菜单增加符号层自定义
+
+LeftIO 选中时，右上角输入法菜单新增：
+
+```text
+自定义符号层…
+```
+
+设置窗口按物理九宫格排列：`Q` 固定为进入/退出键，`W/E/A/S/D/Z/X/C` 可编辑。设计边界：
+
+- 允许每个位置保存一个或多个普通字符。
+- 禁止空值、换行和控制字符。
+- 保存后立即更新当前 controller，不要求重新部署 Rime。
+- 只持久化相对 bundled YAML 的差异，偏好键为 `SymbolLayerTextOverrides.v1`。
+- `恢复默认` 把界面恢复为 bundled 值；保存后如果没有差异，就删除整个 override 偏好。
+- `activateServer` 每次重新加载偏好，确保 LeftIO 重启后仍生效。
+- 同时覆写 `showPreferences`，让系统偏好入口和自定义菜单走同一个窗口。
+
+验收至少覆盖四条：默认符号输出、自定义后立即输出、进程重启后仍输出自定义值、恢复默认后 override 偏好消失。只看到窗口或 `defaults` 中有值不算符号层可用。
+
+### 18.21 2026-07-12 不要把用户正在使用微信输入法误判成安装器切错输入源
+
+调试期间读取到当前输入源从 ABC 变成微信输入法，曾被误判为安装脚本擅自切换。用户当时正在正常使用微信输入法，这个变化本来就是用户行为，不是安装故障。
+
+规则：
+
+- 用户正在操作电脑时，当前输入源是动态外部状态，不能仅凭安装前后两次采样推断因果。
+- 用户说自己正在使用微信输入法，就以此为事实，不能再把菜单栏显示微信输入法当异常。
+- 安装器只在“安装开始时 LeftIO 本身正被选中”这一种情况下，临时切到 ASCII fallback，以免杀掉当前 endpoint 后留下假选中状态；新 LeftIO 启动后再恢复 LeftIO。
+- 安装开始时如果是微信、ABC 或其他输入法，安装器不主动切换，也不在结束时强制恢复某个采样值，避免覆盖用户安装期间的主动选择。
+- 安装事务测试把当前源 mock 为 `com.tencent.inputmethod.wetype.pinyin`，并要求 session helper 的调用日志只能有一行 `current`；出现任何 `select` / `select-fallback` 都直接判失败。
+
+### 18.22 2026-07-12 `macl` 可能在清理后异步挂回，单次 `xattr -d` 不构成验收
+
+注册 helper 启动已签名 App 时，macOS 可能不是同步附着 `com.apple.macl`。实际出现过这样的窗口：第一次 `xattr -d` 返回后目录暂时干净，紧接着 `macl` 又出现，严格验证随即失败并触发一次本来不必要的回滚。
+
+因此三条安装路径必须使用相同规则：
+
+- 用户级 CLI、DMG 自安装、系统级安装都在注册后重新规范化扩展属性。
+- 每次删除后都重新递归读取整个 bundle，不能只相信删除命令的退出码。
+- 对 `quarantine` / `macl` 最多重试四轮，每轮间隔 0.2 秒；四轮后仍存在才算真实失败。
+- `com.apple.provenance` 是受保护元数据，只警告，不冒充 `quarantine` / `macl` 错误。
+
+教训：异步系统元数据不能用“命令刚返回时看起来干净”作为事务提交条件，最终状态必须由后续独立读取确认。
+
+### 18.23 2026-07-12 符号设置保存不能只更新打开窗口的旧 controller
+
+InputMethodKit 允许多个文本 client 的 controller 交错存活。用户从 controller A 打开设置窗口后，焦点可能已经转到 controller B；如果保存回调只弱引用 A，那么 B 会继续使用旧符号，表现为“设置保存了，但当前输入仍未立即生效”。
+
+修复后的规则：
+
+- 设置窗口是进程级单例，避免临时 controller 释放时窗口消失。
+- 偏好先持久化，再把新配置同步到所有仍然 active 的 LeftIO controller。
+- 每个 controller 在应用新配置前取消待处理 Q 手势、符号层和数字层状态，避免用新旧映射拼接一次输入。
+- 没有 active controller 时允许保存；下次 `activateServer` 从偏好重新加载。
+- Unicode 控制字符和所有换行/行分隔符都拒绝保存。
+
+验收仍以用户实体键盘为准：保存后当前文本框立即输出新符号、切换客户端仍一致、LeftIO 重启后继续保留；仅看到 `defaults` 写入不算完成。
+
+### 18.24 2026-07-12 数字层从 Space 和弦改为 Q 长按触发
+
+原来的数字输入依赖按住 Space 再按九宫格键。这个设计把普通空格、候选提交和数字层共用同一个 pending 状态；只要 Space key-up 丢失，就可能泄漏成“没有按 Space 也输出数字”。现在删除 Space chord，Space key-down 只负责提交当前候选/组字，空闲时直接输出空格。
+
+新的默认手势：
+
+```text
+短按 Q（无组字/候选） -> 符号层
+长按 Q 0.45 秒        -> 数字层
+数字层 QWE/ASD/ZXC    -> 123/456/789
+数字层短按 Q           -> 1
+数字层再次长按 Q       -> 退出
+```
+
+Q key-down 先被吞掉，不立即执行；Q key-up 在阈值前到达时结算为短按，主线程计时器先达到 0.45 秒时结算为长按。按键重复不会重启计时器。组字或候选存在时，短按 Q 仍保留音节分隔符语义，不读取空闲短按配置。
+
+顶部输入法菜单改为 `自定义输入层…`。设置窗口可分别选择“单击 Q”和“长按 Q”进入符号层或数字层；默认值写在 bundled `onehand_symbols.yaml`，用户只持久化相对默认值的 `QGestureLayerOverrides.v1` 差异。保存会同步到所有 active controller，并先清理未结算的 Q 手势及活动层。
+
+验收边界：Space 与字母键不能再产生数字；长按 Q 后完整九宫格必须输出 1–9；短按和长按设置要能独立交换；`Esc`、切换输入源、打开/保存设置时都必须清理 pending Q 和活动层。

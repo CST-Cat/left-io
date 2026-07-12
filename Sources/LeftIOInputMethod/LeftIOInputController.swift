@@ -7,6 +7,7 @@ import OneHandAppKit
 
 @objc(LeftIOInputController)
 final class LeftIOInputController: IMKInputController {
+    private static let qLongPressDuration: TimeInterval = 0.45
     private static let sessionBackendFactory = LeftIOSessionBackendFactory()
     private static let inputLogLock = NSLock()
     private static let inputEventLoggingEnabled =
@@ -28,6 +29,10 @@ final class LeftIOInputController: IMKInputController {
     private var pendingShiftToggle = false
     private var lastShiftToggleUptime: TimeInterval = 0
     private var localAsciiMode = false
+    private var isQKeyDown = false
+    private var qLongPressWorkItem: DispatchWorkItem?
+    fileprivate var isInputServerActive = false
+    private var activeInputClient: Any?
     private var candidatePanelPresentation: CandidatePanelPresentation = .compact
     private var expandedCandidateStartIndex = 0
     private var expandedActiveRowIndex = 0
@@ -43,6 +48,7 @@ final class LeftIOInputController: IMKInputController {
     }
 
     deinit {
+        qLongPressWorkItem?.cancel()
         Self.writeInputLog("controller deinit")
         RKeyEventTap.close(controller: self)
     }
@@ -95,6 +101,22 @@ final class LeftIOInputController: IMKInputController {
         session.displayedCandidates
     }
 
+    override func menu() -> NSMenu! {
+        let menu = NSMenu(title: "LeftIO")
+        let item = NSMenuItem(
+            title: "自定义输入层…",
+            action: #selector(showSymbolLayerSettings(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    override func showPreferences(_ sender: Any!) {
+        showSymbolLayerSettings(sender)
+    }
+
     override func commitComposition(_ sender: Any!) {
         guard let sender else {
             return
@@ -107,6 +129,9 @@ final class LeftIOInputController: IMKInputController {
     override func activateServer(_ sender: Any!) {
         super.activateServer(sender)
         Self.writeInputLog("activateServer sender=\(String(describing: sender))")
+        isInputServerActive = true
+        activeInputClient = sender
+        oneHandController.updateConfiguration(Self.loadConfiguration())
         if let client = sender as? IMKTextInput {
             client.overrideKeyboard(withKeyboardNamed: "com.apple.keylayout.ABC")
             Self.writeInputLog("activate overrideKeyboard=com.apple.keylayout.ABC")
@@ -117,9 +142,44 @@ final class LeftIOInputController: IMKInputController {
         hideCandidateWindow()
     }
 
+    @objc
+    private func showSymbolLayerSettings(_ sender: Any?) {
+        if isInputServerActive {
+            _ = cancelTransientInputState()
+        }
+        let bundledConfiguration = Self.loadBundledConfiguration()
+        let effectiveConfiguration = LeftIOSymbolSettingsStore()
+            .effectiveConfiguration(base: bundledConfiguration)
+        let settingsController = MainActor.assumeIsolated {
+            LeftIOSymbolSettingsWindow.shared
+        }
+        MainActor.assumeIsolated {
+            settingsController.show(
+                bundledConfiguration: bundledConfiguration,
+                effectiveConfiguration: effectiveConfiguration,
+                onSave: { configuration in
+                    let appliedControllerCount = RKeyEventTap
+                        .applyConfigurationToActiveControllers(configuration)
+                    LeftIOInputController.writeInputLog(
+                        "input layer settings saved appliedControllerCount=\(appliedControllerCount)"
+                    )
+                }
+            )
+        }
+    }
+
+    fileprivate func applySymbolLayerConfiguration(_ configuration: OneHandConfiguration) {
+        guard isInputServerActive else {
+            return
+        }
+        _ = cancelTransientInputState()
+        oneHandController.updateConfiguration(configuration)
+    }
+
     override func deactivateServer(_ sender: Any!) {
         Self.writeInputLog("deactivateServer sender=\(String(describing: sender))")
-        _ = oneHandController.cancelTransientState()
+        isInputServerActive = false
+        _ = cancelTransientInputState()
         RKeyEventTap.deactivate(controller: self)
 
         if let sender,
@@ -130,6 +190,7 @@ final class LeftIOInputController: IMKInputController {
         hideCandidateWindow()
         hideModeIndicator()
         session.reset()
+        activeInputClient = nil
         hasMarkedText = false
         pendingShiftToggle = false
         localAsciiMode = false
@@ -139,9 +200,11 @@ final class LeftIOInputController: IMKInputController {
 
     override func inputControllerWillClose() {
         Self.writeInputLog("inputControllerWillClose")
-        _ = oneHandController.cancelTransientState()
+        isInputServerActive = false
+        _ = cancelTransientInputState()
         RKeyEventTap.close(controller: self)
         session.reset()
+        activeInputClient = nil
         hideCandidateWindow()
         hideModeIndicator()
         hasMarkedText = false
@@ -223,7 +286,7 @@ final class LeftIOInputController: IMKInputController {
     }
 
     private func toggleLocalAsciiMode(client sender: Any) {
-        _ = oneHandController.cancelTransientState()
+        _ = cancelTransientInputState()
         localAsciiMode.toggle()
         session.setAsciiMode(false)
         synchronizeClientState(client: sender)
@@ -254,8 +317,28 @@ final class LeftIOInputController: IMKInputController {
             )
         }
 
+        let shouldScheduleQLongPress: Bool
+        if mappedEvent.key == .q {
+            switch mappedEvent.phase {
+            case .down:
+                if isQKeyDown {
+                    Self.writeInputEventLog("\(source) qRepeat ignored")
+                    return true
+                }
+                isQKeyDown = true
+                shouldScheduleQLongPress = true
+            case .up:
+                cancelQLongPressTimer()
+                isQKeyDown = false
+                shouldScheduleQLongPress = false
+            }
+        } else {
+            shouldScheduleQLongPress = false
+            preparePendingQPressForNonQKeyDown(mappedEvent)
+        }
+
         if shouldForceClientDelete(for: mappedEvent) {
-            _ = oneHandController.cancelTransientState()
+            _ = cancelTransientInputState()
             session.reset()
             hasMarkedText = false
             collapseCandidatePanel()
@@ -266,8 +349,6 @@ final class LeftIOInputController: IMKInputController {
             )
             return true
         }
-
-        cancelStalePendingSpaceIfNeeded(before: mappedEvent)
 
         if handleCandidatePanelShortcut(
             mappedEvent,
@@ -281,6 +362,9 @@ final class LeftIOInputController: IMKInputController {
         }
 
         let result = oneHandController.handle(mappedEvent)
+        if shouldScheduleQLongPress {
+            scheduleQLongPress()
+        }
         updateCandidatePanelPresentation(after: result.actions, event: mappedEvent)
         synchronizeClientState(client: sender)
         Self.writeInputEventLog(
@@ -296,11 +380,68 @@ final class LeftIOInputController: IMKInputController {
             && !session.context.isComposing
     }
 
+    private func scheduleQLongPress() {
+        cancelQLongPressTimer()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else {
+                return
+            }
+            self.qLongPressWorkItem = nil
+            guard self.isQKeyDown,
+                  let sender = self.eventTapClient() else {
+                return
+            }
+
+            let result = self.oneHandController.triggerQLongPress()
+            self.updateCandidatePanelPresentation(
+                after: result.actions,
+                event: .init(key: .q, phase: .down)
+            )
+            self.synchronizeClientState(client: sender)
+            Self.writeInputEventLog(
+                "qLongPress threshold=\(Self.qLongPressDuration) actions=\(result.actions)"
+            )
+        }
+        qLongPressWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.qLongPressDuration,
+            execute: workItem
+        )
+    }
+
+    private func cancelQLongPressTimer() {
+        qLongPressWorkItem?.cancel()
+        qLongPressWorkItem = nil
+    }
+
+    @discardableResult
+    private func cancelTransientInputState() -> [OneHandAction] {
+        cancelQLongPressTimer()
+        isQKeyDown = false
+        return oneHandController.cancelTransientState()
+    }
+
+    private func preparePendingQPressForNonQKeyDown(_ event: OneHandKeyEvent) {
+        guard event.phase == .down, isQKeyDown else {
+            return
+        }
+
+        cancelQLongPressTimer()
+        guard !isPhysicalQDown() else {
+            return
+        }
+
+        isQKeyDown = false
+        _ = oneHandController.cancelPendingQPress()
+    }
+
     fileprivate func handleEventTapRKeyDown() -> Bool {
-        guard let sender = client() else {
+        guard let sender = eventTapClient() else {
             Self.writeInputEventLog("eventTapR no client")
             return false
         }
+
+        preparePendingQPressForNonQKeyDown(.init(key: .r, phase: .down))
 
         if hasMarkedText || session.context.isComposing {
             let result = oneHandController.handle(.init(key: .r, phase: .down))
@@ -312,7 +453,7 @@ final class LeftIOInputController: IMKInputController {
             return result.isConsumed
         }
 
-        _ = oneHandController.cancelTransientState()
+        _ = cancelTransientInputState()
         session.reset()
         collapseCandidatePanel()
         hideCandidateWindow()
@@ -350,8 +491,8 @@ final class LeftIOInputController: IMKInputController {
         client sender: Any
     ) -> Bool {
         guard mappedEvent.phase == .down,
-              session.context.hasCandidates,
-              !isPhysicalSpaceDown() else {
+              !isQKeyDown,
+              session.context.hasCandidates else {
             return false
         }
 
@@ -476,6 +617,7 @@ final class LeftIOInputController: IMKInputController {
     private static func collapsesCandidatePanel(_ action: OneHandAction) -> Bool {
         switch action {
         case .inputT9Code,
+             .inputDigit,
              .insertSyllableDelimiter,
              .deleteBackward,
              .selectCandidate,
@@ -494,7 +636,7 @@ final class LeftIOInputController: IMKInputController {
         characters: String?,
         charactersIgnoringModifiers: String?
     ) -> Bool {
-        guard let sender = client() else {
+        guard let sender = eventTapClient() else {
             Self.writeInputEventLog(
                 "eventTap key=\(mappedEvent.key.rawValue) no client phase=\(mappedEvent.phase)"
             )
@@ -509,6 +651,10 @@ final class LeftIOInputController: IMKInputController {
             charactersIgnoringModifiers: charactersIgnoringModifiers,
             client: sender
         )
+    }
+
+    private func eventTapClient() -> Any? {
+        client() ?? activeInputClient
     }
 
     private func handleLocalAsciiKeyEvent(
@@ -656,20 +802,10 @@ final class LeftIOInputController: IMKInputController {
         return String(keyCode)
     }
 
-    private func cancelStalePendingSpaceIfNeeded(before event: OneHandKeyEvent) {
-        guard event.phase == .down,
-              event.key != .space,
-              !isPhysicalSpaceDown() else {
-            return
-        }
-
-        _ = oneHandController.cancelPendingSpace()
-    }
-
-    private func isPhysicalSpaceDown() -> Bool {
+    private func isPhysicalQDown() -> Bool {
         CGEventSource.keyState(
             .combinedSessionState,
-            key: CGKeyCode(kVK_Space)
+            key: CGKeyCode(kVK_ANSI_Q)
         )
     }
 
@@ -875,7 +1011,7 @@ final class LeftIOInputController: IMKInputController {
         return .seed
     }
 
-    private static func loadConfiguration() -> OneHandConfiguration {
+    private static func loadBundledConfiguration() -> OneHandConfiguration {
         let bundle = Bundle.main
         let candidates = [
             bundle.url(forResource: "onehand_symbols", withExtension: "yaml", subdirectory: "Rime"),
@@ -891,6 +1027,12 @@ final class LeftIOInputController: IMKInputController {
         }
 
         return OneHandConfiguration()
+    }
+
+    private static func loadConfiguration() -> OneHandConfiguration {
+        LeftIOSymbolSettingsStore().effectiveConfiguration(
+            base: loadBundledConfiguration()
+        )
     }
 
     private static func makeSession() -> AnyOneHandSession {
@@ -1017,9 +1159,21 @@ private final class LeftIOSessionBackendFactory: @unchecked Sendable {
 extension LeftIOInputController: @unchecked Sendable {}
 
 final class RKeyEventTap {
+    private final class WeakControllerReference {
+        weak var controller: LeftIOInputController?
+
+        init(_ controller: LeftIOInputController) {
+            self.controller = controller
+        }
+    }
+
     private static let inputSourceID = "io.github.cstcat.inputmethod.leftio.onehandt9"
     private static let bundleInputSourceID = "io.github.cstcat.inputmethod.leftio"
-    nonisolated(unsafe) private static weak var activeController: LeftIOInputController?
+    // InputMethodKit may keep more than one controller alive while focus moves
+    // between clients. Retain weak references to every active controller so a
+    // temporary controller deactivating cannot erase the route to an older,
+    // still-active client.
+    nonisolated(unsafe) private static var activeControllers: [WeakControllerReference] = []
     nonisolated(unsafe) private static var eventTap: CFMachPort?
     nonisolated(unsafe) private static var runLoopSource: CFRunLoopSource?
 
@@ -1030,10 +1184,41 @@ final class RKeyEventTap {
     static func activate(controller: LeftIOInputController) {
         bind(controller: controller)
         ensureEventTap()
+        LeftIOInputController.writeInputLog(
+            "eventTapR controllerBound active=\(controller.isInputServerActive) currentSourceIsLeftIO=\(currentInputSourceIsLeftIO())"
+        )
     }
 
     static func bind(controller: LeftIOInputController) {
-        activeController = controller
+        activeControllers.removeAll { reference in
+            reference.controller == nil || reference.controller === controller
+        }
+        guard controller.isInputServerActive else {
+            return
+        }
+        activeControllers.append(WeakControllerReference(controller))
+    }
+
+    @discardableResult
+    static func applyConfigurationToActiveControllers(
+        _ configuration: OneHandConfiguration
+    ) -> Int {
+        activeControllers.removeAll { reference in
+            guard let controller = reference.controller else {
+                return true
+            }
+            return !controller.isInputServerActive
+        }
+
+        var appliedCount = 0
+        for reference in activeControllers {
+            guard let controller = reference.controller else {
+                continue
+            }
+            controller.applySymbolLayerConfiguration(configuration)
+            appliedCount += 1
+        }
+        return appliedCount
     }
 
     private static func ensureEventTap() {
@@ -1041,6 +1226,10 @@ final class RKeyEventTap {
             LeftIOInputController.writeInputLog("eventTapR active reused")
             return
         }
+
+        LeftIOInputController.writeInputLog(
+            "eventTapR permission listen=\(CGPreflightListenEventAccess()) accessibility=\(AXIsProcessTrusted())"
+        )
 
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
             | CGEventMask(1 << CGEventType.keyUp.rawValue)
@@ -1066,25 +1255,35 @@ final class RKeyEventTap {
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        LeftIOInputController.writeInputLog("eventTapR enabled")
+        LeftIOInputController.writeInputLog("eventTapR enabled=\(CGEvent.tapIsEnabled(tap: tap))")
     }
 
     static func deactivate(controller: LeftIOInputController) {
-        guard activeController === controller else {
-            return
-        }
-
-        activeController = nil
-        LeftIOInputController.writeInputLog("eventTapR controllerClearedAfterDeactivate")
+        remove(controller: controller, reason: "deactivate")
     }
 
     static func close(controller: LeftIOInputController) {
-        guard activeController === controller else {
-            return
-        }
+        remove(controller: controller, reason: "close")
+    }
 
-        activeController = nil
-        LeftIOInputController.writeInputLog("eventTapR controllerClearedOnClose")
+    private static func remove(controller: LeftIOInputController, reason: String) {
+        activeControllers.removeAll { reference in
+            reference.controller == nil || reference.controller === controller
+        }
+        let fallback = currentActiveController()
+        LeftIOInputController.writeInputLog(
+            "eventTapR controllerRemoved reason=\(reason) fallback=\(fallback != nil) activeCount=\(activeControllers.count)"
+        )
+    }
+
+    private static func currentActiveController() -> LeftIOInputController? {
+        activeControllers.removeAll { reference in
+            guard let controller = reference.controller else {
+                return true
+            }
+            return !controller.isInputServerActive
+        }
+        return activeControllers.last?.controller
     }
 
     private static let eventTapCallback: CGEventTapCallBack = { _, type, event, _ in
@@ -1109,7 +1308,9 @@ final class RKeyEventTap {
             return Unmanaged.passUnretained(event)
         }
 
-        guard currentInputSourceIsLeftIO() else {
+        let controller = currentActiveController()
+        let hasActiveController = controller?.isInputServerActive == true
+        guard hasActiveController || currentInputSourceIsLeftIO() else {
             return Unmanaged.passUnretained(event)
         }
 
@@ -1135,7 +1336,8 @@ final class RKeyEventTap {
             return Unmanaged.passUnretained(event)
         }
 
-        if let controller = activeController {
+        if let controller,
+           controller.isInputServerActive {
             LeftIOInputController.writeInputEventLog(
                 "eventTap routeToController key=\(mappedEvent.key.rawValue) phase=\(mappedEvent.phase)"
             )

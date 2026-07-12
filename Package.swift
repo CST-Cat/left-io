@@ -72,6 +72,11 @@ let package = Package(
             name: "OneHandKeyboardTests",
             dependencies: ["OneHandKeyboard"],
             path: "Tests/OneHandKeyboardTests"
+        ),
+        .testTarget(
+            name: "LeftIOInputMethodTests",
+            dependencies: ["LeftIOInputMethod", "OneHand"],
+            path: "Tests/LeftIOInputMethodTests"
         )
     ]
 )

@@ -1,10 +1,14 @@
 import Foundation
 
 public struct OneHandStateMachine: Equatable, Sendable {
-    public var spaceChord = SpaceChordController()
+    public private(set) var configuration: OneHandConfiguration
     public var symbolLayer: SymbolLayerController
+    public var numericLayer = NumericLayerController()
+    public private(set) var isQPressPending = false
+    public private(set) var didTriggerQLongPress = false
 
     public init(configuration: OneHandConfiguration = OneHandConfiguration()) {
+        self.configuration = configuration
         self.symbolLayer = SymbolLayerController(configuration: configuration)
     }
 
@@ -17,80 +21,108 @@ public struct OneHandStateMachine: Equatable, Sendable {
         }
     }
 
-    public mutating func cancelTransientState() -> [OneHandAction] {
-        var actions: [OneHandAction] = []
-        if let action = spaceChord.cancel() {
-            actions.append(action)
+    public mutating func triggerQLongPress(context: OneHandContext) -> [OneHandAction] {
+        guard isQPressPending, !didTriggerQLongPress else {
+            return []
         }
+
+        didTriggerQLongPress = true
+        return toggleLayer(configuration.qLongPressLayer)
+    }
+
+    public mutating func cancelTransientState() -> [OneHandAction] {
+        var actions = cancelPendingQPress()
         if symbolLayer.isActive {
             actions.append(symbolLayer.exit())
+        }
+        if numericLayer.isActive {
+            actions.append(numericLayer.exit())
         }
         return actions
     }
 
-    public mutating func cancelPendingSpace() -> [OneHandAction] {
-        guard let action = spaceChord.cancel() else {
+    public mutating func cancelPendingQPress() -> [OneHandAction] {
+        guard isQPressPending else {
             return []
         }
 
-        return [action]
+        isQPressPending = false
+        didTriggerQLongPress = false
+        return [.cancelPendingQPress]
+    }
+
+    public mutating func updateConfiguration(_ configuration: OneHandConfiguration) {
+        self.configuration = configuration
+        symbolLayer.configuration = configuration
     }
 
     private mutating func handleKeyDown(_ event: OneHandKeyEvent, context: OneHandContext) -> [OneHandAction] {
         let key = event.key
 
-        if key == .space {
-            spaceChord.begin()
+        if key == .q {
+            guard !isQPressPending else {
+                return []
+            }
+            isQPressPending = true
+            didTriggerQLongPress = false
             return []
         }
 
-        if spaceChord.isHoldingSpace {
-            if key == .escape {
-                return routeNonSpaceKeyDown(event, context: context)
-            }
-
-            if let chord = spaceChord.chordAction(for: key) {
-                return [chord]
-            }
-
-            var actions: [OneHandAction] = []
-            var routedContext = context
-            if let standaloneSpace = spaceChord.end(context: context) {
-                actions.append(standaloneSpace)
-                if standaloneSpace == .commitFirstCandidate {
-                    // Actions are applied in order by OneHandInputController.
-                    // A standalone Space commits (or clears a literal)
-                    // composition before the following physical key is
-                    // routed, so that key must not see the stale candidate
-                    // context from before the commit.
-                    routedContext.isComposing = false
-                    routedContext.hasCandidates = false
-                }
-            }
-            actions.append(contentsOf: routeNonSpaceKeyDown(event, context: routedContext))
-            return actions
+        if key == .escape {
+            return routeKeyDown(event, context: context)
         }
 
-        return routeNonSpaceKeyDown(event, context: context)
+        var actions: [OneHandAction] = []
+        if isQPressPending {
+            if didTriggerQLongPress {
+                isQPressPending = false
+                didTriggerQLongPress = false
+            } else {
+                actions.append(contentsOf: finishQTap(context: context))
+            }
+        }
+        actions.append(contentsOf: routeKeyDown(event, context: context))
+        return actions
     }
 
     private mutating func handleKeyUp(_ key: OneHandKey, context: OneHandContext) -> [OneHandAction] {
-        guard key == .space else {
+        guard key == .q, isQPressPending else {
             return []
         }
 
-        if let action = spaceChord.end(context: context) {
-            return [action]
+        if didTriggerQLongPress {
+            isQPressPending = false
+            didTriggerQLongPress = false
+            return []
         }
 
-        return []
+        return finishQTap(context: context)
     }
 
-    private mutating func routeNonSpaceKeyDown(_ event: OneHandKeyEvent, context: OneHandContext) -> [OneHandAction] {
+    private mutating func finishQTap(context: OneHandContext) -> [OneHandAction] {
+        isQPressPending = false
+        didTriggerQLongPress = false
+
+        if numericLayer.isActive {
+            return [.inputDigit(1)]
+        }
+
+        if symbolLayer.isActive {
+            return [symbolLayer.exit()]
+        }
+
+        if context.isComposing || context.hasCandidates {
+            return [.insertSyllableDelimiter]
+        }
+
+        return activateLayer(configuration.qTapLayer)
+    }
+
+    private mutating func routeKeyDown(_ event: OneHandKeyEvent, context: OneHandContext) -> [OneHandAction] {
         let key = event.key
 
-        if key == .q {
-            return handleQ(context: context)
+        if let numericAction = numericLayer.action(for: key) {
+            return [numericAction]
         }
 
         if let symbolActions = symbolLayer.action(for: key) {
@@ -103,6 +135,10 @@ public struct OneHandStateMachine: Equatable, Sendable {
                 actions.append(.cancelComposition)
             }
             return actions
+        }
+
+        if key == .space {
+            return [(context.isComposing || context.hasCandidates) ? .commitFirstCandidate : .insertSpace]
         }
 
         if let code = key.t9Code {
@@ -133,18 +169,40 @@ public struct OneHandStateMachine: Equatable, Sendable {
         }
     }
 
-    private mutating func handleQ(context: OneHandContext) -> [OneHandAction] {
-        switch OneHandQFunctionKeyType.resolve(
-            isSymbolLayerActive: symbolLayer.isActive,
-            context: context
-        ) {
-        case .enterSymbolLayer:
-            return [symbolLayer.enter()]
-        case .exitSymbolLayer:
-            return [symbolLayer.exit()]
-        case .insertSyllableDelimiter:
-            return [.insertSyllableDelimiter]
+    private mutating func toggleLayer(_ layer: OneHandInputLayer) -> [OneHandAction] {
+        switch layer {
+        case .symbol:
+            if symbolLayer.isActive {
+                return [symbolLayer.exit()]
+            }
+            return activateLayer(.symbol)
+        case .numeric:
+            if numericLayer.isActive {
+                return [numericLayer.exit()]
+            }
+            return activateLayer(.numeric)
         }
+    }
+
+    private mutating func activateLayer(_ layer: OneHandInputLayer) -> [OneHandAction] {
+        var actions: [OneHandAction] = []
+        switch layer {
+        case .symbol:
+            if numericLayer.isActive {
+                actions.append(numericLayer.exit())
+            }
+            if !symbolLayer.isActive {
+                actions.append(symbolLayer.enter())
+            }
+        case .numeric:
+            if symbolLayer.isActive {
+                actions.append(symbolLayer.exit())
+            }
+            if !numericLayer.isActive {
+                actions.append(numericLayer.enter())
+            }
+        }
+        return actions
     }
 
     private func fallbackTextForF(event: OneHandKeyEvent, context: OneHandContext) -> String {

@@ -325,7 +325,11 @@ public final class OneHandRimeSession: OneHandSession {
 
     public func apply(_ action: OneHandAction) {
         switch action {
-        case .enterSymbolLayer, .exitSymbolLayer, .cancelPendingSpace:
+        case .enterSymbolLayer,
+             .exitSymbolLayer,
+             .enterNumericLayer,
+             .exitNumericLayer,
+             .cancelPendingQPress:
             break
         case .cancelComposition:
             bridge.clearComposition()
