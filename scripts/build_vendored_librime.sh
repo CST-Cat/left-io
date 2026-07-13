@@ -5,9 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENDOR_DIR="$ROOT_DIR/vendor"
 LIBRIME_DIR="$VENDOR_DIR/librime"
 LIBRIME_REPOSITORY="https://github.com/rime/librime.git"
-# librime 1.17.0. Keep source and submodule revisions reproducible.
+# Post-1.17.0 librime revision. Keep source and submodule revisions reproducible.
 LIBRIME_REVISION="${LEFTIO_LIBRIME_REVISION:-d71168e9e8c8392ed219dca011dbc76b80727d6c}"
-LIBRIME_REF="${LEFTIO_LIBRIME_REF:-refs/tags/latest}"
+# Fetch the pinned commit directly by default. `refs/tags/latest` is a moving
+# upstream tag, so using it as the bootstrap ref makes a clean checkout fail as
+# soon as upstream advances even though LIBRIME_REVISION itself is immutable.
+LIBRIME_REF="${LEFTIO_LIBRIME_REF:-$LIBRIME_REVISION}"
 BUILD_UNIVERSAL="${LEFTIO_BUILD_UNIVERSAL:-1}"
 FORCE_CLEAN_BUILD="${LEFTIO_FORCE_CLEAN_LIBRIME:-0}"
 MACOSX_DEPLOYMENT_TARGET="${LEFTIO_MIN_SYSTEM_VERSION:-13.0}"
